@@ -321,8 +321,8 @@ proc syncRenderedIfStale(book, repo, branch, targets, rev: string): bool =
   let local = execCmdEx("git rev-parse HEAD",
                         workingDir = checkout).output.strip()
   let former = if branch != "": branch else: "HEAD"
-  let remoteOut = execCmdEx("git ls-remote " & repo & " " & former,
-                            workingDir = booksDir)
+  let remoteOut = execCmdEx("git ls-remote " & quoteShell(repo) & " " &
+                            quoteShell(former), workingDir = booksDir)
   if remoteOut.exitCode != 0:
     return false
   let remote = remoteOut.output.splitWhitespace()

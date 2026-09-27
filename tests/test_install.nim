@@ -109,6 +109,21 @@ suite "instalación":
   test "readRecords sin directorio es vacío":
     check readRecords(getTempDir() / "elun-test-noexiste").len == 0
 
+  test "safeName blinda traversals":
+    check safeName("Foo Bar-1.0") == "Foo_Bar-1.0"
+    check safeName("../../etc") == ".._.._etc"
+    check safeName("..") == "_"
+
+  test "filterByPrefix confina al prefijo":
+    check filterByPrefix(@["/usr/bin/foo", "/etc/passwd"], "/usr") ==
+      @["/usr/bin/foo"]
+    check filterByPrefix(@["/usr/bin/foo"], "") == @["/usr/bin/foo"]
+
+  test "filterByPrefix exige borde de directorio":
+    check filterByPrefix(@["/usr-evil/foo", "/usrbin/x"], "/usr").len == 0
+    check underPrefix("/usr", "/usr")
+    check not underPrefix("/usr-evil/foo", "/usr")
+
   test "installDests saca destino con flags pegadas":
     check installDests("install -Dm755 target/release/foo /zz-elun-a/") ==
       @["/zz-elun-a/foo"]

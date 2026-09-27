@@ -163,21 +163,25 @@ proc syncRenderedBook*(book, repo, branch, targets, rev: string) =
   if dirExists(checkout / ".git"):
     run(book, checkout, "git fetch --quiet origin")
     if branch != "":
-      run(book, checkout, "git checkout --quiet " & branch)
+      run(book, checkout, "git checkout --quiet " & quoteShell(branch))
     run(book, checkout, "git pull --ff-only --quiet")
   else:
     var clone = "git clone --quiet"
     if branch != "":
-      clone.add " --branch " & branch
-    clone.add " " & repo & " " & quoteShell(checkout)
+      clone.add " --branch " & quoteShell(branch)
+    clone.add " " & quoteShell(repo) & " " & quoteShell(checkout)
     run(book, booksDir, clone)
 
   # El html lo escribe xsltproc antes de que el Makefile corra un solo mkdir,
   # así que el directorio tiene que existir de antemano.
   let renderDir = checkout / "html"
   createDir(renderDir)
-  run(book, checkout, "make --no-print-directory " & targets &
-      " BASEDIR=" & quoteShell(renderDir) & " " & rev)
+  # targets queda sin blindar a propósito: son dos argumentos, no uno.
+  var command = "make --no-print-directory " & targets &
+    " BASEDIR=" & quoteShell(renderDir)
+  if rev != "":
+    command.add " " & quoteShell(rev)
+  run(book, checkout, command)
 
 proc syncIndexBookIfChanged*(client: HttpClient, book, name,
                              indexUrl: string): bool =

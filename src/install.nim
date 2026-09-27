@@ -10,11 +10,22 @@ type Step = tuple[asRoot: bool, code: string]
 
 let stateDir* = getHomeDir() / ".local" / "share" / "elun"
 
+proc safeName*(s: string): string =
+  ## Nombres de capítulos y URLs llegan a rutas: sin esto un "../" escaparía
+  ## de stateDir. Se guarda el nombre original en el JSON, esto es solo path.
+  for c in s:
+    if c.isAlphaNumeric or c in {'-', '_', '.'}:
+      result.add c
+    else:
+      result.add '_'
+  if result in ["", ".", ".."]:
+    result = "_"
+
 proc buildDirFor(name: string): string =
-  stateDir / "build" / name
+  stateDir / "build" / safeName(name)
 
 proc recordPathFor(name: string): string =
-  stateDir / "installed" / name & ".json"
+  stateDir / "installed" / safeName(name) & ".json"
 
 proc isRoot(): bool =
   try:
@@ -208,7 +219,7 @@ proc findRecord*(name: string): string =
   if not dirExists(stateDir / "installed"):
     return ""
   for path in walkFiles(stateDir / "installed" / "*.json"):
-    if path.splitFile().name.toLowerAscii == name.toLowerAscii:
+    if path.splitFile().name.toLowerAscii == safeName(name).toLowerAscii:
       return path
   return ""
 
@@ -227,7 +238,7 @@ proc buildAndRecord(f: Found, url, md5: string): int64 =
   let t0 = now()
   let dir = buildDirFor(f.name)
   createDir(dir)
-  let tarball = dir / url.split('/')[^1]
+  let tarball = dir / safeName(url.split('/')[^1])
   let client = newHttpClient(userAgent = "elun")
   if not fileExists(tarball):
     downloadSource(client, url, tarball)
@@ -299,7 +310,7 @@ proc hasTarget(dir, tool, makefile, target: string): bool =
   if not fileExists(dir / makefile):
     return false
   try:
-    return execCmdEx(tool & " -n " & target,
+    return execCmdEx(quoteShell(tool) & " -n " & quoteShell(target),
                      workingDir = dir).exitCode == 0
   except CatchableError:
     return false
@@ -307,7 +318,7 @@ proc hasTarget(dir, tool, makefile, target: string): bool =
 proc findUninstall*(srcDir: string): tuple[kind, dir, command: string] =
   ## Cómo desinstalar: regla del Makefile, manifiesto de cmake o nada. El
   ## manifiesto cubre a cmake, que genera Makefiles con install pero sin
-  ## uninstall.
+  ## uninstall. En command va la orden o la ruta del manifiesto.
   for sub in ["", "build"]:
     let dir = if sub == "": srcDir else: srcDir / sub
     if hasTarget(dir, "make", "Makefile", "uninstall"):
@@ -317,9 +328,44 @@ proc findUninstall*(srcDir: string): tuple[kind, dir, command: string] =
   for sub in ["", "build"]:
     let dir = if sub == "": srcDir else: srcDir / sub
     if fileExists(dir / "install_manifest.txt"):
-      return ("manifest", dir,
-              "xargs rm < " & quoteShell(dir / "install_manifest.txt"))
+      return ("manifest", dir, dir / "install_manifest.txt")
   return ("", "", "")
+
+proc underPrefix*(p, prefix: string): bool =
+  p == prefix or p.startsWith(prefix & "/")
+
+proc filterByPrefix*(paths: seq[string], prefix: string): seq[string] =
+  ## Solo entra lo instalado bajo el prefijo registrado. Sin prefijo no se
+  ## puede saber: entra todo como antes.
+  for p in paths:
+    if prefix == "" or underPrefix(p, prefix):
+      result.add p
+
+proc uninstallManifest(name, manifest, prefix: string) =
+  var files: seq[string]
+  var dirs: seq[string]
+  var outside = 0
+  for line in lines(manifest):
+    let p = line.strip()
+    if p == "":
+      continue
+    if prefix != "" and not underPrefix(p, prefix):
+      echo "  salto fuera de prefijo: " & p
+      inc outside
+      continue
+    if fileExists(p):
+      files.add p
+    elif dirExists(p):
+      dirs.add p
+  if files.len > 0:
+    # -d '\n': las rutas con espacios no se parten.
+    let list = manifest & ".elun-filtered"
+    writeFile(list, files.join("\n") & "\n")
+    run(name, manifest.parentDir,
+        elevate("xargs -d '\\n' rm -f < " & quoteShell(list)))
+    removeFile(list)
+  for d in dirs:
+    run(name, manifest.parentDir, elevate("rmdir " & quoteShell(d)))
 
 proc installDests*(code: string): seq[string] =
   ## Destinos concretos de los `install` del capítulo (capítulos cargo). Las
@@ -378,8 +424,10 @@ proc removePackage*(pkg: string) =
     quit(1)
   echo name & ": desinstalando"
   let found = findUninstall(enterSource(dir))
-  if found.kind != "":
+  if found.kind == "rule":
     run(name, found.dir, elevate(found.command))
+  elif found.kind == "manifest":
+    uninstallManifest(name, found.command, rec["prefix"].getStr(""))
   else:
     # Capítulos cargo: el capítulo dice qué archivos puso.
     var chapter = ""
@@ -394,6 +442,7 @@ proc removePackage*(pkg: string) =
     for s in installSteps(installSection(chapter)):
       if s.asRoot:
         dests.add installDests(s.code)
+    dests = filterByPrefix(dests, rec["prefix"].getStr(""))
     if dests.len == 0:
       echo "ERROR: " & name & " no trae forma de desinstalación"
       quit(1)
