@@ -1,0 +1,5 @@
+elun
+nimcache/
+.nimble/
+*.exe
+AGENTS.md
