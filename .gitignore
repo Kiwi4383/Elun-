@@ -3,3 +3,5 @@ nimcache/
 .nimble/
 *.exe
 AGENTS.md
+tests/*
+!tests/*.nim

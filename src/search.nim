@@ -3,20 +3,21 @@ import common
 import update_books
 
 type
-  Deps = object
-    build, runtime, optional: seq[string]
-  Found = object
-    book, location, section, name, version: string
-    deps: Deps
-    unknownDeps: bool
-  Section = object
-    level: int
-    title, body: string
+  Deps* = object
+    build*, runtime*, optional*: seq[string]
+  Found* = object
+    book*, location*, section*, name*, version*: string
+    chapter*: string
+    deps*: Deps
+    unknownDeps*: bool
+  Section* = object
+    level*: int
+    title*, body*: string
 
 # Encabezados que son avisos, no subsecciones, aunque el XSL los ponga como h.
 const asides = ["note", "notes", "warning", "important", "caution", "tip"]
 
-proc stripTags(s: string): string =
+proc stripTags*(s: string): string =
   var dropping = false
   for c in s:
     if c == '<':
@@ -26,10 +27,10 @@ proc stripTags(s: string): string =
     elif not dropping:
       result.add c
 
-proc cleanText(s: string): string =
+proc cleanText*(s: string): string =
   stripTags(s).replace("&nbsp;", " ").splitWhitespace().join(" ")
 
-proc canonTags(html: string): string =
+proc canonTags*(html: string): string =
   ## tidy parte los tags largos en varias líneas; acá se colapsan para que los
   ## find("<a "), find("<strong ...>") y demás funcionen siempre.
   var inTag = false
@@ -44,7 +45,7 @@ proc canonTags(html: string): string =
     if c == '>':
       inTag = false
 
-proc sectionsOf(html: string): seq[Section] =
+proc sectionsOf*(html: string): seq[Section] =
   ## Parte el HTML por sus encabezados h1..h6, en orden. El cuerpo de cada uno
   ## llega hasta el próximo encabezado de su mismo nivel o superior, así que un
   ## capítulo incluye todas sus subsecciones.
@@ -59,7 +60,7 @@ proc sectionsOf(html: string): seq[Section] =
         let closeTag = "</h" & $level & ">"
         let closeStart = html.find(closeTag, openEnd)
         if openEnd > 0 and closeStart > 0:
-          marks.add (level, i, openEnd + 1,
+          marks.add (level, i, closeStart + closeTag.len,
                       cleanText(html[openEnd + 1 ..< closeStart]))
           i = closeStart + closeTag.len
           continue
@@ -73,7 +74,7 @@ proc sectionsOf(html: string): seq[Section] =
     result.add Section(level: m.level, title: m.title,
                        body: html[m.content ..< stop])
 
-proc linkTexts(body: string): seq[string] =
+proc linkTexts*(body: string): seq[string] =
   var i = body.find("<a")
   while i >= 0:
     if i + 2 < body.len and body[i + 2] in {'>', ' ', '\t', '\n', '\r', '\f'}:
@@ -87,7 +88,7 @@ proc linkTexts(body: string): seq[string] =
         continue
     i = body.find("<a", i + 2)
 
-proc splitNameVersion(s: string): tuple[name, version: string] =
+proc splitNameVersion*(s: string): tuple[name, version: string] =
   var i = s.len - 1
   while i > 0:
     if s[i] == '-' and i + 1 < s.len and s[i + 1].isDigit:
@@ -95,7 +96,7 @@ proc splitNameVersion(s: string): tuple[name, version: string] =
     dec i
   return (s, "")
 
-proc matchHeading(raw, query: string): tuple[ok: bool, name, version: string] =
+proc matchHeading*(raw, query: string): tuple[ok: bool, name, version: string] =
   ## "8.22. Binutils-2.47" y "cURL-8.21.0" valen; "Appendix C. Dependencies"
   ## no, porque no trae versión. El " - Pass 1" de LFS no es parte del nombre.
   var t = cleanText(raw)
@@ -112,8 +113,14 @@ proc matchHeading(raw, query: string): tuple[ok: bool, name, version: string] =
   let p = t.find(passMarker)
   if p >= 0:
     t = t[0 ..< p].strip()
-  let (name, version) = splitNameVersion(t)
-  if version == "":
+  let (name, rawVersion) = splitNameVersion(t)
+  # La versión es el primer token con forma de versión ("2.25" en
+  # "Which-2.25 and Alternatives"). Si no hay, no es un capítulo de paquete.
+  let tokens = rawVersion.splitWhitespace()
+  if tokens.len == 0:
+    return (false, "", "")
+  let version = tokens[0]
+  if not version[0].isDigit:
     return (false, "", "")
   let (qname, qver) = splitNameVersion(query)
   if name.toLowerAscii != qname.toLowerAscii:
@@ -122,13 +129,13 @@ proc matchHeading(raw, query: string): tuple[ok: bool, name, version: string] =
     return (false, "", "")
   return (true, name, version)
 
-proc splitItems(s: string): seq[string] =
+proc splitItems*(s: string): seq[string] =
   for part in stripTags(s).replace(" and ", ",").split(','):
     let t = part.strip()
     if t != "" and t notin result:
       result.add t
 
-proc appendixDeps(path, name: string): tuple[deps: Deps, found: bool] =
+proc appendixDeps*(path, name: string): tuple[deps: Deps, found: bool] =
   ## Apéndice C de LFS/MLFS: entradas <h2>/<h3>Nombre</h3> con pares
   ## "Installation depends on:" / "Required at runtime:" / ...
   let html = canonTags(readFile(path))
@@ -157,12 +164,12 @@ proc appendixDeps(path, name: string): tuple[deps: Deps, found: bool] =
       return (deps, true)
   return (Deps(), false)
 
-proc addUnique(s: var seq[string], items: seq[string]) =
+proc addUnique*(s: var seq[string], items: seq[string]) =
   for it in items:
     if it notin s:
       s.add it
 
-proc classify(deps: var Deps, sub: string, items: seq[string]) =
+proc classify*(deps: var Deps, sub: string, items: seq[string]) =
   ## Required y Recommended hacen falta para compilar; lo marcado como runtime
   ## hace falta para funcionar; el resto es opcional. Los avisos no son
   ## subsecciones aunque vengan como encabezado.
@@ -176,7 +183,7 @@ proc classify(deps: var Deps, sub: string, items: seq[string]) =
   else:
     deps.build.addUnique items
 
-proc detailBlocks(body: string): seq[tuple[title, content: string]] =
+proc detailBlocks*(body: string): seq[tuple[title, content: string]] =
   ## GLFS/SLFS meten las subsecciones en <details><summary>Sub</summary>.
   var rest = body
   while true:
@@ -193,7 +200,7 @@ proc detailBlocks(body: string): seq[tuple[title, content: string]] =
       result.add (cleanText(inner[s1 + 9 ..< s2]), inner[s2 + 10 .. ^1])
     rest = rest[c + 10 .. ^1]
 
-proc blfsDepsOn(html: string): tuple[deps: Deps, found: bool] =
+proc blfsDepsOn*(html: string): tuple[deps: Deps, found: bool] =
   ## Sección "<Nombre> Dependencies" de BLFS/GLFS/SLFS, con subsecciones
   ## Required, Recommended, Recommended at runtime, Optional, ...
   let sections = sectionsOf(html)
@@ -215,30 +222,42 @@ proc blfsDepsOn(html: string): tuple[deps: Deps, found: bool] =
       return (deps, true)
   return (Deps(), false)
 
-proc withDeps(book, location, section, name, version, html,
-              appendix: string): Found =
+proc withDeps*(book, location, section, name, version, html,
+               appendix: string): Found =
   ## Required y Recommended hacen falta para compilar; lo marcado como runtime
   ## hace falta para funcionar; el resto es opcional.
   result = Found(book: book, location: location, section: section,
-                 name: name, version: version)
+                 name: name, version: version, chapter: html)
   let blfs = blfsDepsOn(html)
   if blfs.found:
     result.deps = blfs.deps
-    return
   if appendix != "" and fileExists(appendix):
+    # El apéndice completa lo que el capítulo no trae.
     let entry = appendixDeps(appendix, name)
     if entry.found:
-      result.deps = entry.deps
+      if result.deps.build.len == 0:
+        result.deps.build = entry.deps.build
+      if result.deps.runtime.len == 0:
+        result.deps.runtime = entry.deps.runtime
+      if result.deps.optional.len == 0:
+        result.deps.optional = entry.deps.optional
       return
+  if blfs.found:
+    return
   result.unknownDeps = true
 
-proc searchNochunks(book, path, query: string): seq[Found] =
+proc relPath*(path: string): string =
+  if path.startsWith(booksDir):
+    return path[len(booksDir) + 1 .. ^1]
+  return path
+
+proc searchNochunks*(book, path, query: string): seq[Found] =
   if not fileExists(path):
     return
   let html = canonTags(readFile(path))
   # Solo el apéndice C de LFS/MLFS usa anclas "xxx-dep" en sus entradas.
   let lfsKind = "-dep\"" in html
-  let location = path[len(booksDir) + 1 .. ^1]
+  let location = relPath(path)
   for s in sectionsOf(html):
     if s.level notin [1, 2]:
       continue
@@ -252,7 +271,7 @@ proc searchNochunks(book, path, query: string): seq[Found] =
       result.add withDeps(book, location, s.title, m.name, m.version, s.body,
                           "")
 
-proc searchChunked(book, dir, appendix, query: string): seq[Found] =
+proc searchChunked*(book, dir, appendix, query: string): seq[Found] =
   if not dirExists(dir):
     return
   for path in walkDirRec(dir):
@@ -266,7 +285,7 @@ proc searchChunked(book, dir, appendix, query: string): seq[Found] =
         continue
       let m = matchHeading(h.title, query)
       if m.ok:
-        result.add withDeps(book, path[len(booksDir) + 1 .. ^1], h.title,
+        result.add withDeps(book, relPath(path), h.title,
                             m.name, m.version, html, appendix)
         break
 
@@ -324,21 +343,21 @@ proc refreshIfStale(client: HttpClient): bool =
     if syncRenderedIfStale(book, repo, branch, targets, rev):
       result = true
 
-proc report*(pkg: string) =
+proc findPackage*(pkg: string): seq[Found] =
   if not dirExists(booksDir):
     echo "no hay libros: corré `elun update-books` primero"
-    return
-  var found = searchOnce(pkg)
-  if found.len == 0:
+    return @[]
+  result = searchOnce(pkg)
+  if result.len == 0:
     echo pkg & ": no está en los libros, buscando libros nuevos..."
     let client = newHttpClient(userAgent = "elun")
-    let updated = refreshIfStale(client)
+    if refreshIfStale(client):
+      result = searchOnce(pkg)
     client.close()
-    if updated:
-      found = searchOnce(pkg)
-  if found.len == 0:
+  if result.len == 0:
     echo "aviso: " & pkg & " no existe en los libros"
-    return
+
+proc printFound*(found: seq[Found]) =
   for f in found:
     echo f.name & "-" & f.version & " está en " & f.book & " (" &
          f.location & ", " & f.section & ")"

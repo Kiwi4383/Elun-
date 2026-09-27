@@ -147,7 +147,7 @@ proc updateBlfsDevelopment*(client: HttpClient) =
       echo "  " & $(i + 1) & "/" & $pages.len
   saveHashes(bookDir, hashes)
 
-proc run(book: string, dir: string, command: string) =
+proc run*(book: string, dir: string, command: string) =
   echo "  " & command
   let (output, code) = execCmdEx(command, workingDir = dir)
   if code != 0:

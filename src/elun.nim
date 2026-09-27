@@ -1,6 +1,7 @@
 import std/os
 import update_books
 import search
+import install
 
 const usage = """
 Elun - instalador de paquetes guiado por los libros de Linux From Scratch
@@ -11,6 +12,8 @@ Uso:
   elun update-books
   elun remove <paquete>
   elun orphans
+  elun list
+  elun search <paquete>
 """
 
 proc needName(command: string): bool =
@@ -32,15 +35,24 @@ proc main(): int =
   of "install", "update":
     if needName(command):
       return 1
-    report(paramStr(2))
+    if command == "install":
+      installPackage(paramStr(2))
+    else:
+      updatePackage(paramStr(2))
   of "update-books":
     updateBooks()
   of "remove":
     if needName("remove"):
       return 1
-    echo "remove " & paramStr(2) & ": todavia no implementado"
+    removePackage(paramStr(2))
   of "orphans":
     echo "orphans: todavia no implementado"
+  of "list":
+    listPackages()
+  of "search":
+    if needName("search"):
+      return 1
+    printFound(findPackage(paramStr(2)))
   else:
     echo "comando desconocido: " & command
     echo usage

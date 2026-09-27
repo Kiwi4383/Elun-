@@ -33,10 +33,11 @@ Elun elige de qué rama saca cada paquete.
 Elun instala.
 
 1. Se usa la información que dan los propios libros para iniciar la instalación de un paquete: dónde crear las carpetas y qué compilador necesita.
-2. Elun ejecuta los comandos del libro. La idea es un mini Portage: pedís el paquete y Elun hace la compilación.
-3. Se usa la configuración estándar de cada libro. Elun no inventa rutas: usa las que el propio libro define.
+2. Elun ejecuta los comandos del libro. La idea es un mini Portage: pedís el paquete y Elun hace la compilación. Vale todo libro, incluido LFS/MLFS sobre el host.
+3. Se usa la configuración estándar de cada libro. Elun no inventa rutas: usa las que el propio libro define. Los comandos marcados para root (`<pre class="root">`) se corren con sudo; el resto como el usuario actual. Las test suites no se corren en la instalación.
 4. Las carpetas creadas para los paquetes NO llevan su número de versión, solamente el nombre del programa: "Discord", no "Discord.198.2.1". Internamente Elun sí guarda la versión, y el programa la muestra con `--version`.
 5. Al actualizar, Elun compila encima de lo que ya está instalado, sin borrar la carpeta. Es decisión de quien pidió el proyecto.
+6. Cada instalación deja registro (nombre, versión, libro, fecha, fuente, MD5 y prefijo) para que update, remove y orphans tengan de dónde leer después.
 
 ### Fase 4 ###
 
@@ -53,8 +54,13 @@ Todo en inglés.
 - `elun install <paquete>`
 - `elun update <paquete>` — actualiza el paquete.
 - `elun update-books` — baja y actualiza los libros.
-- `elun remove <paquete>` — desinstala el paquete (fase 3).
+- `elun remove <paquete>` — desinstala el paquete (fase 3). Usa la regla
+  `uninstall` del Makefile si existe (verificado con `make -n`, sin ejecutar),
+  si no el `install_manifest.txt` de cmake, si no los destinos de los comandos
+  `install` del propio capítulo (capítulos cargo).
 - `elun orphans` — lista los paquetes instalados que ya nadie necesita. Requiere la base de instalados y las dependencias resueltas, así que queda bloqueado por la fase 4.
+- `elun list` — paquetes instalados con versión, libro y tiempo.
+- `elun search <paquete>` — búsqueda de solo lectura, sin instalar.
 
 ### Calidad de vida ###
 
