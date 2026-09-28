@@ -46,7 +46,7 @@ proc main(): int =
       return 1
     removePackage(paramStr(2))
   of "orphans":
-    echo "orphans: todavia no implementado"
+    listOrphans()
   of "list":
     listPackages()
   of "search":

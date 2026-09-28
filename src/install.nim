@@ -129,7 +129,11 @@ proc runStep(pkg: string, step: Step, workDir: string, n: int) =
   let (output, code) = execCmdEx(command, workingDir = workDir)
   echo output
   if code != 0:
-    echo "ERROR: paso " & $n & " falló en " & pkg
+    # Fase 4: se aborta y queda el .log en la carpeta de compilación.
+    let log = workDir / ".elun-failed.log"
+    writeFile(log, "paquete: " & pkg & "\npaso: " & $n & " [" & who & "]\n" &
+      "comando:\n" & step.code & "\nsalida:\n" & output)
+    echo "ERROR: paso " & $n & " falló en " & pkg & " (log en " & log & ")"
     quit(1)
 
 proc checkMd5(path, expected: string) =
@@ -213,6 +217,44 @@ proc listPackages*() =
     if r.hasKey("seconds"):
       line.add "  " & formatDur(r["seconds"].getInt(0).int64)
     echo line
+
+proc orphansOf*(pkgs: seq[tuple[name: string, deps: seq[string]]]): seq[string] =
+  ## Huérfano = instalado que ningún otro instalado lista como dependencia.
+  ## Los nombres se comparan sin versión y sin mayúsculas ("libpsl-0.23.3" vale
+  ## por "libpsl"). Sin registro de motivo de instalación, una hoja instalada
+  ## a mano también sale: eso lo resuelve la fase 4 con resolución de
+  ## dependencias.
+  var needed: seq[string]
+  for p in pkgs:
+    for d in p.deps:
+      let n = splitNameVersion(d).name.toLowerAscii
+      if n != "" and n notin needed:
+        needed.add n
+  for p in pkgs:
+    if p.name.toLowerAscii notin needed:
+      result.add p.name
+
+proc listOrphans*() =
+  let recs = readRecords(stateDir / "installed")
+  if recs.len == 0:
+    echo "no hay paquetes instalados"
+    return
+  var pkgs: seq[tuple[name: string, deps: seq[string]]]
+  for r in recs:
+    let name = recName(r)
+    var deps: seq[string]
+    for f in findPackage(name):
+      if f.version == r.getOrDefault("version").getStr(""):
+        deps.add f.deps.build
+        deps.add f.deps.runtime
+        break
+    pkgs.add (name, deps)
+  let orphans = orphansOf(pkgs)
+  if orphans.len == 0:
+    echo "no hay huérfanos"
+  else:
+    for o in orphans:
+      echo o
 
 proc findRecord*(name: string): string =
   ## Ruta del registro instalado, sin distinguir mayúsculas.

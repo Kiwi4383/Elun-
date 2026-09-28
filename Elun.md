@@ -43,7 +43,7 @@ Elun instala.
 
 Propuesta, sin pulir. Queda decidir:
 
-1. Qué hacer cuando un paquete falla al compilar y cómo reintentar sin romper lo que ya quedó instalado.
+1. Cuando un paquete falla al compilar, Elun aborta y deja un `.elun-failed.log` en la carpeta de compilación con el paso, el comando y la salida. No reintenta solo.
 2. Que Elun resuelva solo las dependencias, en vez de solo avisarlas.
 3. El enrutador de decisiones (el "router", de decisiones y no de red) para enseñarle al gestor a resolver problemas menores de compilación durante la instalación/actualización. Sigue siendo una idea sin decidir.
 
@@ -58,7 +58,7 @@ Todo en inglés.
   `uninstall` del Makefile si existe (verificado con `make -n`, sin ejecutar),
   si no el `install_manifest.txt` de cmake, si no los destinos de los comandos
   `install` del propio capítulo (capítulos cargo).
-- `elun orphans` — lista los paquetes instalados que ya nadie necesita. Requiere la base de instalados y las dependencias resueltas, así que queda bloqueado por la fase 4.
+- `elun orphans` — lista los instalados que ningún otro instalado necesita.
 - `elun list` — paquetes instalados con versión, libro y tiempo.
 - `elun search <paquete>` — búsqueda de solo lectura, sin instalar.
 

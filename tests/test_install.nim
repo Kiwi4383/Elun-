@@ -109,6 +109,23 @@ suite "instalación":
   test "readRecords sin directorio es vacío":
     check readRecords(getTempDir() / "elun-test-noexiste").len == 0
 
+  test "orphansOf marca lo que nadie necesita":
+    let noDeps: seq[string] = @[]
+    check orphansOf(@[(name: "curl", deps: @["libpsl-1.0"]),
+                      (name: "libpsl", deps: noDeps)]) == @["curl"]
+
+  test "orphansOf normaliza versión y mayúsculas":
+    let noDeps2: seq[string] = @[]
+    check orphansOf(@[(name: "Foo", deps: noDeps2),
+                      (name: "libpsl", deps: noDeps2)]) ==
+      @["Foo", "libpsl"]
+    check orphansOf(@[(name: "curl", deps: @["LIBPSL-0.23.3"]),
+                      (name: "libpsl", deps: noDeps2)]) == @["curl"]
+
+  test "orphansOf vacío es vacío":
+    let none: seq[tuple[name: string, deps: seq[string]]] = @[]
+    check orphansOf(none).len == 0
+
   test "safeName blinda traversals":
     check safeName("Foo Bar-1.0") == "Foo_Bar-1.0"
     check safeName("../../etc") == ".._.._etc"
