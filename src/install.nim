@@ -147,12 +147,21 @@ proc downloadSource(client: HttpClient, url, dest: string) =
   writeFile(dest, fetch(client, url).body)
 
 proc enterSource(workDir: string): string =
-  ## El tarball suele traer un solo directorio: se entra en él.
+  ## El tarball suele traer un solo directorio: se entra en él. Si ese
+  ## directorio es un symlink fuera del build, se aborta en vez de compilar
+  ## afuera.
   var dirs: seq[string]
   for kind, path in walkDir(workDir):
     if kind == pcDir:
       dirs.add path
   if dirs.len == 1:
+    try:
+      if getFileInfo(dirs[0], followSymlink = false).kind == pcLinkToDir:
+        echo "ERROR: la fuente apunta fuera de " & workDir
+        quit(1)
+    except OSError:
+      echo "ERROR: no se pudo revisar " & dirs[0]
+      quit(1)
     return dirs[0]
   return workDir
 
@@ -383,7 +392,24 @@ proc filterByPrefix*(paths: seq[string], prefix: string): seq[string] =
     if prefix == "" or underPrefix(p, prefix):
       result.add p
 
-proc uninstallManifest(name, manifest, prefix: string) =
+proc cmakePrefix*(dir: string): string =
+  ## CMAKE_INSTALL_PREFIX del CMakeCache, para confinar el manifiesto cuando
+  ## el registro no trae prefijo.
+  for sub in ["", "build"]:
+    let cache = (if sub == "": dir else: dir / sub) / "CMakeCache.txt"
+    if not fileExists(cache):
+      continue
+    for line in lines(cache):
+      if line.startsWith("CMAKE_INSTALL_PREFIX:"):
+        let parts = line.split('=', 1)
+        if parts.len == 2 and parts[1].strip() != "":
+          return parts[1].strip()
+  return ""
+
+proc uninstallManifest(name, manifest, prefix: string, srcDir: string) =
+  var effective = prefix
+  if effective == "":
+    effective = cmakePrefix(srcDir)
   var files: seq[string]
   var dirs: seq[string]
   var outside = 0
@@ -391,7 +417,7 @@ proc uninstallManifest(name, manifest, prefix: string) =
     let p = line.strip()
     if p == "":
       continue
-    if prefix != "" and not underPrefix(p, prefix):
+    if effective != "" and not underPrefix(p, effective):
       echo "  salto fuera de prefijo: " & p
       inc outside
       continue
@@ -469,7 +495,8 @@ proc removePackage*(pkg: string) =
   if found.kind == "rule":
     run(name, found.dir, elevate(found.command))
   elif found.kind == "manifest":
-    uninstallManifest(name, found.command, rec["prefix"].getStr(""))
+    uninstallManifest(name, found.command, rec["prefix"].getStr(""),
+                      enterSource(dir))
   else:
     # Capítulos cargo: el capítulo dice qué archivos puso.
     var chapter = ""

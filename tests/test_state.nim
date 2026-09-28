@@ -2,6 +2,14 @@ import std/[os, tables, unittest]
 import update_books
 
 suite "manifiestos":
+  test "safeHref acepta rutas internas":
+    check safeHref("basicnet/curl.html")
+    check safeHref("index.html")
+
+  test "safeHref rechaza escape":
+    check not safeHref("/etc/passwd")
+    check not safeHref("../afuera.html")
+    check not safeHref("sub/../../afuera.html")
   test "recordHash guarda el digest nuevo":
     var hashes = initTable[string, string]()
     check recordHash(hashes, "a.html", "contenido")

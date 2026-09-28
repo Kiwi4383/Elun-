@@ -29,6 +29,15 @@ const renderedBooks* = [
   ("SLFS", slfsRepo, "", "html", "")
 ]
 
+proc safeHref*(href: string): bool =
+  ## Solo rutas relativas dentro del libro: ni absolutas ni con "..".
+  if href.startsWith("/"):
+    return false
+  for part in href.split('/'):
+    if part == "..":
+      return false
+  return true
+
 proc currentBook*(client: HttpClient, dirUrl: string): string =
   ## Devuelve el nombre del HTML de un solo archivo que el sitio tiene ahora.
   ## El índice ya dice cuál está vigente, así que no hay que comparar versiones.
@@ -131,9 +140,9 @@ proc updateBlfsDevelopment*(client: HttpClient) =
   var pages: seq[string]
   for href in hrefsIn(index):
     # La portada enlaza preface/preface.html dos veces, así que se descarta lo
-    # repetido para no bajarlo de nuevo.
+    # repetido para no bajarlo de nuevo. Solo rutas internas al libro.
     if (href.endsWith(".html") or href.endsWith(".css")) and
-        not href.startsWith("/") and href notin pages:
+        safeHref(href) and href notin pages:
       pages.add href
   echo "BLFS development: " & $pages.len & " archivos"
 

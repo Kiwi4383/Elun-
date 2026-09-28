@@ -141,6 +141,17 @@ suite "instalación":
     check underPrefix("/usr", "/usr")
     check not underPrefix("/usr-evil/foo", "/usr")
 
+  test "cmakePrefix lee el prefijo del cache":
+    let dir = getTempDir() / "elun-test-cmake"
+    createDir(dir)
+    writeFile(dir / "CMakeCache.txt",
+      "ALGO:STRING=x\nCMAKE_INSTALL_PREFIX:PATH=/opt/foo\n")
+    check cmakePrefix(dir) == "/opt/foo"
+    removeDir(dir)
+
+  test "cmakePrefix vacío si no hay":
+    check cmakePrefix(getTempDir() / "elun-test-noexiste") == ""
+
   test "installDests saca destino con flags pegadas":
     check installDests("install -Dm755 target/release/foo /zz-elun-a/") ==
       @["/zz-elun-a/foo"]
