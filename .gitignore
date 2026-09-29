@@ -5,3 +5,4 @@ nimcache/
 AGENTS.md
 tests/*
 !tests/*.nim
+.opencode/

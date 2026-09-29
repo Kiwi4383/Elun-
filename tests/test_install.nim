@@ -37,8 +37,10 @@ suite "instalación":
     check src.url == "https://ejemplo.com/foo-1.5.tar.xz"
     check src.md5 == "abcdef1234567890abcdef1234567890"
 
-  test "packageSource falla sin MD5":
-    check not packageSource("<p>Download (HTTP): https://e.com/f.tar</p>").ok
+  test "packageSource sin MD5 avisa pero vale":
+    let src = packageSource("<li>Download: https://e.com/f.tar.xz</li>")
+    check src.ok and src.md5 == ""
+    check src.url == "https://e.com/f.tar.xz"
 
   test "packageSource falla sin URL":
     check not packageSource("<p>Download MD5 sum: abc123</p>").ok
@@ -80,6 +82,20 @@ suite "instalación":
 
   test "findPrefix vacío si no hay":
     check findPrefix(@["make", "make install"]) == ""
+
+  test "stepScript guarda y restaura cwd":
+    let script = stepScript("make", "/tmp/x/.elun-cwd")
+    check "set -eu" in script
+    check "cat" in script and "pwd >" in script
+    check "SUDO_USER" in script
+
+  test "cwd persiste entre pasos":
+    let dir = getTempDir() / "elun-test-cwd"
+    createDir(dir / "sub")
+    runStep("t", (asRoot: false, code: "cd sub"), dir, 1, dir / ".elun-cwd")
+    check readFile(dir / ".elun-cwd").strip() == dir / "sub"
+    runStep("t", (asRoot: false, code: "pwd"), dir, 2, dir / ".elun-cwd")
+    removeDir(dir)
 
   test "formatDur en minutos y segundos":
     check formatDur(90) == "1m30s"

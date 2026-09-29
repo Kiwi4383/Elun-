@@ -58,18 +58,20 @@ proc listItemAfter(html, label: string): string =
   return cleanText(stripTags(html[a ..< b]))
 
 proc packageSource*(html: string): tuple[url, md5: string, ok: bool] =
-  ## "Download (HTTP)" y "Download MD5 sum" de la Package Information: el md5
-  ## es el primer token hexadecimal de 32 del item.
-  let raw = listItemAfter(html, "Download (HTTP):").splitWhitespace()
+  ## "Download (HTTP)"/"Download:" y "Download MD5 sum" de la Package
+  ## Information. GLFS/SLFS no publican MD5: ahí md5 viene vacío.
+  var raw = listItemAfter(html, "Download (HTTP):").splitWhitespace()
+  if raw.len == 0:
+    raw = listItemAfter(html, "Download:").splitWhitespace()
   let sums = listItemAfter(html, "Download MD5 sum:").splitWhitespace()
-  if raw.len == 0 or sums.len == 0:
+  if raw.len == 0:
     return ("", "", false)
   for token in raw:
     if token.startsWith("http"):
       for s in sums:
         if s.len == 32 and s.allCharsInSet({'0' .. '9', 'a' .. 'f', 'A' .. 'F'}):
           return (token, s.toLowerAscii, true)
-      return ("", "", false)
+      return (token, "", true)
   return ("", "", false)
 
 proc installSection*(html: string): string =
@@ -116,11 +118,23 @@ proc findPrefix*(codes: seq[string]): string =
         return words[0].strip(chars = {'\\', '"', '\''})
   return ""
 
-proc runStep(pkg: string, step: Step, workDir: string, n: int) =
+proc stepScript*(code, stateFile: string): string =
+  ## Cada <pre> corre en su propio sh: el archivo guarda dónde quedó el
+  ## último para que el siguiente arranque ahí (`cd build` no se pierde).
+  result = "#!/bin/sh\nset -eu\n"
+  result.add "if [ -f " & quoteShell(stateFile) & " ]; then cd \"$(cat " &
+    quoteShell(stateFile) & ")\"; fi\n"
+  result.add code & "\n"
+  result.add "pwd > " & quoteShell(stateFile) & "\n"
+  result.add "[ -n \"${SUDO_USER:-}\" ] && chown \"$SUDO_USER\" " &
+    quoteShell(stateFile) & " || true\n"
+
+proc runStep*(pkg: string, step: Step, workDir: string, n: int,
+              stateFile: string) =
   let script = workDir / ".elun-step-" & $n & ".sh"
   # set -u: los capítulos LFS usan variables como $LFS que acá no existen y
   # con nounset el script se corta en vez de expandir vacío.
-  writeFile(script, "#!/bin/sh\nset -eu\n" & step.code & "\n")
+  writeFile(script, stepScript(step.code, stateFile))
   let who = if step.asRoot: "root" else: "user"
   echo "  [" & who & "] paso " & $n
   var command = "sh " & quoteShell(script)
@@ -291,9 +305,13 @@ proc buildAndRecord(f: Found, url, md5: string): int64 =
   createDir(dir)
   let tarball = dir / safeName(url.split('/')[^1])
   let client = newHttpClient(userAgent = "elun")
-  if not fileExists(tarball):
+  # Sin MD5 no hay cómo verificar un tarball viejo: se baja de nuevo.
+  if not fileExists(tarball) or md5 == "":
     downloadSource(client, url, tarball)
-  checkMd5(tarball, md5)
+  if md5 != "":
+    checkMd5(tarball, md5)
+  else:
+    echo "  aviso: el libro no publica MD5, solo protege el TLS"
   client.close()
   let srcDir = unpack(f.name, tarball)
   let steps = installSteps(installSection(f.chapter))
@@ -302,7 +320,7 @@ proc buildAndRecord(f: Found, url, md5: string): int64 =
     quit(1)
   var codes: seq[string]
   for i, step in steps:
-    runStep(f.name, step, srcDir, i + 1)
+    runStep(f.name, step, srcDir, i + 1, dir / ".elun-cwd")
     if not step.asRoot:
       codes.add step.code
   let secs = (now() - t0).inSeconds

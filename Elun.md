@@ -38,6 +38,7 @@ Elun instala.
 4. [x] Las carpetas creadas para los paquetes NO llevan su número de versión, solamente el nombre del programa: "Discord", no "Discord.198.2.1". Internamente Elun sí guarda la versión, y el programa la muestra con `--version`.
 5. [x] Al actualizar, Elun compila encima de lo que ya está instalado, sin borrar la carpeta. Es decisión de quien pidió el proyecto.
 6. [x] Cada instalación deja registro (nombre, versión, libro, fecha, fuente, MD5 y prefijo) para que update, remove y orphans tengan de dónde leer después.
+7. Si el capítulo no publica MD5 (GLFS/SLFS no lo hacen en ningún capítulo), se instala igual sobre TLS verificado con aviso en log. Sin MD5 no se reutiliza un tarball viejo: se baja de nuevo.
 
 ### Fase 4 ###
 
