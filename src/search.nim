@@ -276,22 +276,15 @@ proc blfsDepsOn*(html: string): tuple[deps: Deps, found: bool] =
         (st == "dependencies" or s.title.len > len("dependencies")):
       var deps: Deps
       var j = k + 1
-      var currentSub = ""
       # Un Note/Warning no cierra la sección en ningún nivel: se salta y se
       # sigue. Cualquier otro encabezado de nivel igual o superior sí la cierra.
+      # Toda subsección (directa o más profunda) clasifica por su propio
+      # título: sin herencia entre hermanas.
       while j < sections.len and (sections[j].level > s.level or
           sections[j].title.toLowerAscii.strip() in asides):
         let sub = sections[j].title
         if sub.toLowerAscii.strip() notin asides:
-          if sections[j].level == s.level + 1:
-            currentSub = sub
-            classify(deps, sub, linkTexts(sections[j].body))
-          elif sections[j].level > s.level + 1:
-            # Salto de nivel (h5 bajo h3 sin h4): la primera subsección
-            # profunda establece la vigente.
-            if currentSub == "":
-              currentSub = sub
-            classify(deps, currentSub, linkTexts(sections[j].body))
+          classify(deps, sub, linkTexts(sections[j].body))
         inc j
       for d in detailBlocks(s.body):
         classify(deps, d.title, linkTexts(d.content))

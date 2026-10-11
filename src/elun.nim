@@ -102,12 +102,9 @@ proc main(): int =
       if found.len == 0:
         return 1
     else:
-      if isVersionFlag(command):
-        echo "elun " & elunVersion
-      else:
-        echo "unknown command: " & command
-        echo usage
-        return 1
+      echo "unknown command: " & command
+      echo usage
+      return 1
   except CatchableError as e:
     echo "ERROR: " & e.msg
     return 1

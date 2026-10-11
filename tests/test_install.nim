@@ -67,6 +67,11 @@ suite "instalación":
     check steps.len == 1
     check not steps[0].asRoot
 
+  test "isRootTag rechaza data-class":
+    check not isRootTag("<pre data-class=\"root\">")
+    check isRootTag("<pre class=\"root\">")
+    check isRootTag("<pre class='user root'>")
+
   test "installSteps salta la test suite":
     let steps = installSteps(installSection("<h3>I</h3>" & installBody))
     check "make check" notin steps[0].code
@@ -98,6 +103,11 @@ suite "instalación":
     check "set -e" in script
     check "cat" in script and "pwd >" in script
     check "SUDO_USER" in script
+
+  test "stepScript confina cwd al build":
+    let script = stepScript("make", "/tmp/x/.elun-cwd")
+    check "dirname" in script
+    check "fuera del build" in script
 
   test "cwd persiste entre pasos":
     let dir = getTempDir() / "elun-test-cwd"

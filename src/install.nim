@@ -78,6 +78,10 @@ proc isRootTag*(tag: string): bool =
   let low = tag.toLowerAscii
   var i = low.find("class")
   while i >= 0:
+    # "class" dentro de otro nombre (data-class) no vale.
+    if i > 0 and low[i - 1] in {'a'..'z', '0'..'9', '-', '_'}:
+      i = low.find("class", i + 5)
+      continue
     var j = i + 5
     while j < tag.len and tag[j] in {' ', '\t', '\n', '\r', '\f'}:
       inc j
@@ -170,9 +174,14 @@ proc stepScript*(code, stateFile: string): string =
   ## último para que el siguiente arranque ahí (`cd build` no se pierde).
   ## `set -e` sin `-u`: los capítulos LFS/MLFS usan variables como $LFS que
   ## acá no existen y con nounset el script se cortaría.
+  ## El cwd restaurado se confina bajo el build dir (dirname del stateFile):
+  ## un capítulo malicioso no puede llevar el próximo paso (root) afuera.
   result = "#!/bin/sh\nset -e\n"
-  result.add "if [ -f " & quoteShell(stateFile) & " ]; then cd \"$(cat " &
-    quoteShell(stateFile) & ")\"; fi\n"
+  result.add "S=\"" & stateFile.replace("\\", "\\\\").replace("\"", "\\\"") &
+    "\"\n"
+  result.add "if [ -f \"$S\" ]; then D=\"$(cat \"$S\")\"; R=\"$(dirname \"$S\")\"; " &
+    "case \"$D\" in \"$R\"|\"$R\"/*) cd \"$D\";; " &
+    "*) echo \"cwd fuera del build, se ignora: $D\";; esac; fi\n"
   result.add code & "\n"
   result.add "pwd > " & quoteShell(stateFile) & "\n"
   result.add "[ -n \"${SUDO_USER:-}\" ] && chown \"$SUDO_USER\" " &
@@ -225,19 +234,30 @@ proc downloadSource(client: HttpClient, url, dest: string) =
 proc enterSource(workDir: string): string =
   ## El tarball suele traer un solo directorio: se entra en él. Si ese
   ## directorio es un symlink fuera del build, se aborta en vez de compilar
-  ## afuera.
+  ## afuera. Cualquier symlink de primer nivel que apunte fuera también
+  ## aborta (los internos al árbol son normales en tarballs legítimos).
   var dirs: seq[string]
   for kind, path in walkDir(workDir):
     if kind == pcDir:
       dirs.add path
+    elif kind in [pcLinkToFile, pcLinkToDir]:
+      try:
+        let raw = expandSymlink(path)
+        let absT = normalizedPath(if raw.isAbsolute: raw
+                                  else: path.parentDir / raw)
+        let base = normalizedPath(workDir)
+        if absT != base and not absT.startsWith(base & "/"):
+          raise newException(IOError, "la fuente apunta fuera de " &
+            workDir & ": " & path)
+      except OSError as e:
+        raise newException(IOError, "no se pudo revisar " & path &
+          ": " & e.msg)
   if dirs.len == 1:
     try:
       if getFileInfo(dirs[0], followSymlink = false).kind == pcLinkToDir:
-        echo "ERROR: la fuente apunta fuera de " & workDir
-        quit(1)
+        raise newException(IOError, "la fuente apunta fuera de " & workDir)
     except OSError:
-      echo "ERROR: no se pudo revisar " & dirs[0]
-      quit(1)
+      raise newException(IOError, "no se pudo revisar " & dirs[0])
     return dirs[0]
   return workDir
 
@@ -273,13 +293,22 @@ proc checkTarballMembers(pkg, dest: string) =
       if not memberOk(member):
         raise newException(IOError, pkg & ": el archivo trae miembro fuera" &
           " del build (" & member.strip() & "), no se extrae")
+    let verbOut = execCmdEx("tar -tvf " & quoteShell(dest),
+                            workingDir = dest.parentDir)
+    if verbOut.exitCode == 0:
+      for line in verbOut.output.splitLines():
+        let arrow = line.find(" -> ")
+        if arrow >= 0:
+          let target = line[arrow + 4 .. ^1].strip()
+          if target.startsWith("/") or not memberOk(target):
+            raise newException(IOError, pkg & ": el archivo trae enlace" &
+              " fuera del build (" & target & "), no se extrae")
 
 proc unpack(pkg, dest: string): string =
   checkTarballMembers(pkg, dest)
   if dest.endsWith(".zip"):
     if findExe("unzip") == "":
-      echo "ERROR: falta unzip, necesario para " & dest
-      quit(1)
+      raise newException(IOError, "falta unzip, necesario para " & dest)
     run(pkg, dest.parentDir, "unzip -o -q " & quoteShell(dest))
   else:
     run(pkg, dest.parentDir, "tar -xf " & quoteShell(dest))
@@ -698,7 +727,12 @@ proc removePackage*(pkg: string): bool =
     for s in installSteps(installSection(chapter)):
       if s.asRoot:
         dests.add installDests(s.code)
-    dests = filterByPrefix(dests, rec.getOrDefault("prefix").getStr(""))
+    let cargoPrefix = rec.getOrDefault("prefix").getStr("")
+    if cargoPrefix == "":
+      echo "ERROR: " & name &
+        ": sin prefijo no se desinstala por rutas del capítulo (negado por seguridad)"
+      return false
+    dests = filterByPrefix(dests, cargoPrefix)
     if dests.len == 0:
       echo "ERROR: " & name & " no trae forma de desinstalación"
       return false

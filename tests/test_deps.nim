@@ -186,6 +186,18 @@ suite "dependencias":
     check res.found
     check res.deps.build == @["liba-1.0"]
 
+  test "blfsDepsOn no hereda entre hermanas profundas":
+    let html = "<h1>Foo-1.5</h1>" &
+      "<div class=\"package\"><p>x</p></div>" &
+      "<h3>Foo Dependencies</h3>" &
+      "<h5>Required</h5><p><a href=\"#a\">liba-1.0</a></p>" &
+      "<h5>Optional</h5><p><a href=\"#z\">libz-9.0</a></p>" &
+      "<h3>Installation of Foo</h3>"
+    let res = blfsDepsOn(html)
+    check res.found
+    check res.deps.build == @["liba-1.0"]
+    check res.deps.optional == @["libz-9.0"]
+
   test "withDeps une capítulo y apéndice":
     let chapter = "<h1>Foo-1.5</h1>" &
       "<div class=\"package\"><p>x</p></div>" &

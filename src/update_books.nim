@@ -31,16 +31,18 @@ const renderedBooks* = [
 
 proc safeHref*(href: string): bool =
   ## Solo rutas relativas dentro del libro: ni absolutas, ni URLs externas,
-  ## ni con ".." (incluso codificado como %2e/%2f).
+  ## ni con ".." (incluso codificado). Un punto codificado suelto no es
+  ## traversal y se acepta.
   let low = href.toLowerAscii
   if href.startsWith("/"):
     return false
   if "://" in href:
     return false
-  if "%2e" in low or "%2f" in low or "%5c" in low:
+  if "%2e%2e" in low or ".%2e" in low or "%2e." in low or
+      "%2f" in low or "%5c" in low:
     return false
   for part in href.split('/'):
-    if part == ".." or part.toLowerAscii == "%2e%2e":
+    if part == "..":
       return false
   return true
 
@@ -182,6 +184,18 @@ proc syncBlfsDevIfChanged*(client: HttpClient): bool =
   updateBlfsDevelopment(client, index)
   return true
 
+proc hasRenderedHtml*(renderDir: string): bool =
+  ## Hay salida previa si existe algún .html bajo el renderDir. Cada libro
+  ## genera nombres distintos (MLFS: nochunks, GLFS/SLFS: html), así que no
+  ## se asume `index.html`.
+  try:
+    for path in walkDirRec(renderDir):
+      if path.toLowerAscii.endsWith(".html"):
+        return true
+  except CatchableError:
+    discard
+  return false
+
 proc run*(book: string, dir: string, command: string) =
   echo "  " & command
   let (output, code) = execCmdEx(command, workingDir = dir)
@@ -236,7 +250,7 @@ proc syncRenderedBook*(book, repo, branch, targets, rev: string) =
     try:
       let newRev = execCmdEx("git rev-parse HEAD",
         workingDir = checkout).output.strip()
-      if newRev == oldRev and fileExists(renderDir / "index.html"):
+      if newRev == oldRev and hasRenderedHtml(renderDir):
         echo "  sin cambios, no se renderiza"
         return
     except CatchableError:
