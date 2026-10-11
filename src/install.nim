@@ -35,14 +35,12 @@ proc isRoot(): bool =
 
 proc requireSudo(what: string) =
   if not isRoot() and findExe("sudo") == "":
-    echo "ERROR: falta sudo, necesario para " & what
-    quit(1)
+    raise newException(IOError, "falta sudo, necesario para " & what)
 
 proc requireInstallTools() =
   for tool in ["tar", "sh"]:
     if findExe(tool) == "":
-      echo "ERROR: falta " & tool & ", necesario para instalar"
-      quit(1)
+      raise newException(IOError, "falta " & tool & ", necesario para instalar")
   requireSudo("los pasos de root")
 
 proc unescapeEntities*(s: string): string =
@@ -74,6 +72,39 @@ proc packageSource*(html: string): tuple[url, md5: string, ok: bool] =
       return (token, "", true)
   return ("", "", false)
 
+proc isRootTag*(tag: string): bool =
+  ## Solo `class="root"` (palabra exacta, cualquier capitalización/comillas)
+  ## manda a sudo. Un substring en otro atributo no alcanza.
+  let low = tag.toLowerAscii
+  var i = low.find("class")
+  while i >= 0:
+    var j = i + 5
+    while j < tag.len and tag[j] in {' ', '\t', '\n', '\r', '\f'}:
+      inc j
+    if j < tag.len and tag[j] == '=':
+      inc j
+      while j < tag.len and tag[j] in {' ', '\t', '\n', '\r', '\f'}:
+        inc j
+      if j < tag.len and tag[j] in {'"', '\''}:
+        let q = tag[j]
+        let k = tag.find(q, j + 1)
+        if k > j:
+          if "root" in tag[j + 1 ..< k].toLowerAscii.splitWhitespace():
+            return true
+          i = low.find("class", k + 1)
+          continue
+    i = low.find("class", j + 1)
+  return false
+
+const testParaMarks = ["test suite", "testsuite", "verification test",
+  "regression test", "run the test", "run tests", "run the check"]
+
+proc isTestPara*(para: string): bool =
+  for m in testParaMarks:
+    if m in para:
+      return true
+  return false
+
 proc installSection*(html: string): string =
   for s in sectionsOf(html):
     if s.title.startsWith("Installation of "):
@@ -104,24 +135,42 @@ proc installSteps*(body: string): seq[Step] =
       if b < 0 or c < 0:
         break
       let tag = body[r .. b]
-      if "test suite" notin lastPara and "verification test" notin lastPara:
-        result.add (asRoot: "root" in tag,
+      if not isTestPara(lastPara):
+        result.add (asRoot: isRootTag(tag),
                     code: unescapeEntities(stripTags(body[b + 1 ..< c])).strip())
       i = c + 6
 
 proc findPrefix*(codes: seq[string]): string =
   for code in codes:
-    let i = code.find("--prefix=")
-    if i >= 0:
-      let words = code[i + 9 .. ^1].splitWhitespace()
-      if words.len > 0:
-        return words[0].strip(chars = {'\\', '"', '\''})
+    for line in code.splitLines():
+      let words = line.splitWhitespace()
+      for i, w in words:
+        let clean = w.strip(chars = {'\\', '"', '\''})
+        if clean == "--prefix" and i + 1 < words.len:
+          let v = words[i + 1].strip(chars = {'\\', '"', '\''})
+          if v != "" and not v.startsWith("-"):
+            return v
+        elif clean.startsWith("--prefix="):
+          let v = clean[len("--prefix=") .. ^1].strip(chars = {'\\', '"', '\''})
+          if v != "":
+            return v
+        elif clean.startsWith("-DCMAKE_INSTALL_PREFIX="):
+          let v = clean[len("-DCMAKE_INSTALL_PREFIX=") .. ^1].strip(
+            chars = {'\\', '"', '\''})
+          if v != "":
+            return v
+        elif clean == "-DCMAKE_INSTALL_PREFIX" and i + 1 < words.len:
+          let v = words[i + 1].strip(chars = {'\\', '"', '\''})
+          if v != "" and not v.startsWith("-"):
+            return v
   return ""
 
 proc stepScript*(code, stateFile: string): string =
   ## Cada <pre> corre en su propio sh: el archivo guarda dónde quedó el
   ## último para que el siguiente arranque ahí (`cd build` no se pierde).
-  result = "#!/bin/sh\nset -eu\n"
+  ## `set -e` sin `-u`: los capítulos LFS/MLFS usan variables como $LFS que
+  ## acá no existen y con nounset el script se cortaría.
+  result = "#!/bin/sh\nset -e\n"
   result.add "if [ -f " & quoteShell(stateFile) & " ]; then cd \"$(cat " &
     quoteShell(stateFile) & ")\"; fi\n"
   result.add code & "\n"
@@ -129,11 +178,24 @@ proc stepScript*(code, stateFile: string): string =
   result.add "[ -n \"${SUDO_USER:-}\" ] && chown \"$SUDO_USER\" " &
     quoteShell(stateFile) & " || true\n"
 
+proc removeIfSymlink(path: string) =
+  ## Si el tarball trae `.elun-step-N.sh`/`.elun-cwd` como symlink fuera del
+  ## build, `writeFile`/`sh` lo seguirían. Se borra el enlace antes de usarlo.
+  try:
+    let kind = getFileInfo(path, followSymlink = false).kind
+    if kind in [pcLinkToFile, pcLinkToDir]:
+      if kind == pcLinkToDir:
+        removeDir(path)
+      else:
+        removeFile(path)
+  except OSError:
+    discard
+
 proc runStep*(pkg: string, step: Step, workDir: string, n: int,
               stateFile: string) =
   let script = workDir / ".elun-step-" & $n & ".sh"
-  # set -u: los capítulos LFS usan variables como $LFS que acá no existen y
-  # con nounset el script se corta en vez de expandir vacío.
+  removeIfSymlink(script)
+  removeIfSymlink(stateFile)
   writeFile(script, stepScript(step.code, stateFile))
   let who = if step.asRoot: "root" else: "user"
   echo "  [" & who & "] paso " & $n
@@ -148,13 +210,13 @@ proc runStep*(pkg: string, step: Step, workDir: string, n: int,
     writeFile(log, "paquete: " & pkg & "\npaso: " & $n & " [" & who & "]\n" &
       "comando:\n" & step.code & "\nsalida:\n" & output)
     echo "ERROR: paso " & $n & " falló en " & pkg & " (log en " & log & ")"
-    quit(1)
+    raise newException(IOError, "paso " & $n & " falló en " & pkg &
+      " (log en " & log & ")")
 
 proc checkMd5(path, expected: string) =
   let digest = ($toMD5(readFile(path))).toLowerAscii
   if digest != expected.toLowerAscii:
-    echo "ERROR: " & path & " no coincide con el MD5 del libro"
-    quit(1)
+    raise newException(IOError, path & " no coincide con el MD5 del libro")
 
 proc downloadSource(client: HttpClient, url, dest: string) =
   echo "Bajando fuente " & url
@@ -179,7 +241,41 @@ proc enterSource(workDir: string): string =
     return dirs[0]
   return workDir
 
+proc memberOk(member: string): bool =
+  let m = member.strip()
+  if m == "" or m in [".", "./"]:
+    return true
+  if m.startsWith("/"):
+    return false
+  for part in m.split('/'):
+    if part == "..":
+      return false
+  return true
+
+proc checkTarballMembers(pkg, dest: string) =
+  ## Zip-slip: el tarball viene de un mirror y `tar -xf`/`unzip` directo
+  ## escribiría miembros `../`/absolutos fuera del build. Se lista primero.
+  if dest.endsWith(".zip"):
+    let listOut = execCmdEx("unzip -Z1 " & quoteShell(dest),
+                            workingDir = dest.parentDir)
+    if listOut.exitCode != 0:
+      return # unzip viejo sin -Z1: sin chequeo, como antes
+    for member in listOut.output.splitLines():
+      if not memberOk(member):
+        raise newException(IOError, pkg & ": el archivo trae miembro fuera" &
+          " del build (" & member.strip() & "), no se extrae")
+  else:
+    let listOut = execCmdEx("tar -tf " & quoteShell(dest),
+                            workingDir = dest.parentDir)
+    if listOut.exitCode != 0:
+      raise newException(IOError, pkg & ": no se pudo listar " & dest)
+    for member in listOut.output.splitLines():
+      if not memberOk(member):
+        raise newException(IOError, pkg & ": el archivo trae miembro fuera" &
+          " del build (" & member.strip() & "), no se extrae")
+
 proc unpack(pkg, dest: string): string =
+  checkTarballMembers(pkg, dest)
   if dest.endsWith(".zip"):
     if findExe("unzip") == "":
       echo "ERROR: falta unzip, necesario para " & dest
@@ -196,13 +292,21 @@ proc writeRecord(f: Found, url, md5, prefix: string, secs: int64) =
     "location": f.location, "date": now().format("yyyy-MM-dd HH:mm"),
     "source": url, "md5": md5, "prefix": prefix, "seconds": secs}
   writeFile(recordPathFor(f.name), $rec)
+  # Sin duplicados por mayúsculas ("Foo" vs "foo"): queda el recién escrito.
+  for path in walkFiles(stateDir / "installed" / "*.json"):
+    if path != recordPathFor(f.name) and
+        path.splitFile().name.toLowerAscii == safeName(f.name).toLowerAscii:
+      try:
+        removeFile(path)
+      except OSError:
+        discard
 
 proc formatDur*(secs: int64): string =
   let h = secs div 3600
   let m = (secs mod 3600) div 60
   let s = secs mod 60
   if h > 0:
-    return $h & "h" & $m & "m"
+    return $h & "h" & $m & "m" & $s & "s"
   if m > 0:
     return $m & "m" & $s & "s"
   return $s & "s"
@@ -266,11 +370,21 @@ proc listOrphans*() =
   for r in recs:
     let name = recName(r)
     var deps: seq[string]
-    for f in findPackage(name):
+    # Solo lectura: sin red ni re-baja de libros. Si la versión instalada ya
+    # no está en los libros, valen las deps de cualquier versión homónima
+    # antes que declarar todo huérfano.
+    var sameName: seq[Found] = @[]
+    for f in findPackageLocal(name):
+      if f.name.toLowerAscii == name.toLowerAscii:
+        sameName.add f
+    for f in sameName:
       if f.version == r.getOrDefault("version").getStr(""):
         deps.add f.deps.build
         deps.add f.deps.runtime
         break
+    if deps.len == 0 and sameName.len > 0:
+      deps.add sameName[0].deps.build
+      deps.add sameName[0].deps.runtime
     pkgs.add (name, deps)
   let orphans = orphansOf(pkgs)
   if orphans.len == 0:
@@ -302,6 +416,11 @@ proc recordDurations(): seq[int64] =
 proc buildAndRecord(f: Found, url, md5: string): int64 =
   let t0 = now()
   let dir = buildDirFor(f.name)
+  # Build limpio: la fuente vieja, `.elun-cwd` y `.elun-step-*.sh` viejos
+  # hacían que el update compilara en el directorio equivocado. "Sin borrar
+  # la carpeta" (Elun.md) es la instalada, no la de compilación.
+  if dirExists(dir):
+    removeDir(dir)
   createDir(dir)
   let tarball = dir / safeName(url.split('/')[^1])
   let client = newHttpClient(userAgent = "elun")
@@ -316,8 +435,8 @@ proc buildAndRecord(f: Found, url, md5: string): int64 =
   let srcDir = unpack(f.name, tarball)
   let steps = installSteps(installSection(f.chapter))
   if steps.len == 0:
-    echo "ERROR: el capítulo no trae comandos de instalación"
-    quit(1)
+    raise newException(IOError,
+      "el capítulo no trae comandos de instalación")
   var codes: seq[string]
   for i, step in steps:
     runStep(f.name, step, srcDir, i + 1, dir / ".elun-cwd")
@@ -330,42 +449,52 @@ proc buildAndRecord(f: Found, url, md5: string): int64 =
 proc buildFromFound(f: Found, action: string) =
   let src = packageSource(f.chapter)
   if not src.ok:
-    echo "ERROR: el capítulo no trae descarga verificable con MD5"
-    quit(1)
+    raise newException(IOError, "el capítulo no trae descarga")
+  let prev = recordDurations()
   let secs = buildAndRecord(f, src.url, src.md5)
   echo action & ": " & f.name & "-" & f.version & " (tardó " &
-    formatDur(secs) & ", promedio " & formatDur(average(recordDurations())) &
+    formatDur(secs) & ", promedio " & formatDur(average(prev & @[secs])) &
     ")"
 
-proc installPackage*(pkg: string) =
+proc installPackage*(pkg: string): bool =
   requireInstallTools()
   let found = findPackage(pkg)
   if found.len == 0:
-    return
+    return false
   # La búsqueda ya viene en orden developer primero: se instala la primera.
   let f = found[0]
   printFound(@[f])
   echo f.name & "-" & f.version & " de " & f.book & ": instalando"
   buildFromFound(f, "instalado")
+  return true
 
-proc updatePackage*(pkg: string) =
+proc updatePackage*(pkg: string): bool =
   requireInstallTools()
   let recPath = findRecord(pkg)
   if recPath == "":
     echo pkg & ": no está instalado, usá `elun install` primero"
-    return
-  let rec = parseJson(readFile(recPath))
+    return false
+  var rec: JsonNode
+  try:
+    rec = parseJson(readFile(recPath))
+  except CatchableError:
+    echo "ERROR: registro corrupto: " & recPath
+    return false
+  if not rec.hasKey("name") or not rec.hasKey("version"):
+    echo "ERROR: registro corrupto: " & recPath
+    return false
   let found = findPackage(rec["name"].getStr())
   if found.len == 0:
-    return
+    return false
   let f = found[0]
   if f.version == rec["version"].getStr():
     echo f.name & " ya está en la última versión (" & f.version & ")"
-    return
+    return true
   # Se compila encima sin borrar la carpeta, como pide el doc.
   echo f.name & " " & rec["version"].getStr() & " -> " & f.version &
     " de " & f.book & ": actualizando"
   buildFromFound(f, "actualizado")
+  return true
 
 proc elevate(command: string): string =
   ## sudo salvo que ya se sea root.
@@ -375,8 +504,14 @@ proc elevate(command: string): string =
   return "sudo " & command
 
 proc hasTarget(dir, tool, makefile, target: string): bool =
-  ## `make -n`/`ninja -n` solo preguntan: no ejecutan nada.
+  ## `make -n`/`ninja -n` solo preguntan... salvo que el Makefile use
+  ## `$(shell ...)`: make lo evalúa al parsear. En ese caso no se pregunta.
   if not fileExists(dir / makefile):
+    return false
+  try:
+    if "$(shell" in readFile(dir / makefile):
+      return false
+  except CatchableError:
     return false
   try:
     return execCmdEx(quoteShell(tool) & " -n " & quoteShell(target),
@@ -424,10 +559,14 @@ proc cmakePrefix*(dir: string): string =
           return parts[1].strip()
   return ""
 
-proc uninstallManifest(name, manifest, prefix: string, srcDir: string) =
+proc uninstallManifest*(name, manifest, prefix: string, srcDir: string) =
   var effective = prefix
   if effective == "":
     effective = cmakePrefix(srcDir)
+  if effective == "":
+    echo "ERROR: " & name &
+      ": sin prefijo no se toca el manifiesto (negado por seguridad)"
+    return
   var files: seq[string]
   var dirs: seq[string]
   var outside = 0
@@ -456,84 +595,125 @@ proc uninstallManifest(name, manifest, prefix: string, srcDir: string) =
 proc installDests*(code: string): seq[string] =
   ## Destinos concretos de los `install` del capítulo (capítulos cargo). Las
   ## banderas se saltan (-m/-o/-g comen el siguiente token) y -t dir invierte.
-  for line in code.splitLines():
-    let tokens = line.strip().splitWhitespace()
-    if tokens.len < 3 or tokens[0] != "install":
-      continue
-    var sources: seq[string]
-    var dest = ""
-    var destIsDir = false
-    var i = 1
-    while i < tokens.len:
-      let t = tokens[i].strip(chars = {'\'', '"'})
-      if t == "-t" and i + 1 < tokens.len:
-        dest = tokens[i + 1].strip(chars = {'\'', '"'})
-        destIsDir = true
-        inc i, 2
-      elif t.len > 0 and t[0] == '-':
-        inc i
-        if t in ["-m", "-o", "-g"] and i < tokens.len:
+  ## Solo valen rutas absolutas: una relativa se chequea en un cwd y se
+  ## borraría en otro. `cargo install` no da destinos fiables: se salta.
+  for rawLine in code.splitLines():
+    for chunk in rawLine.replace("&&", ";").replace("||", ";").split(';'):
+      var line = chunk.strip()
+      while line.startsWith("sudo ") or line.startsWith("sudo\t"):
+        line = line[5 .. ^1].strip()
+      var tokens = line.splitWhitespace()
+      if tokens.len == 0:
+        continue
+      if tokens[0] == "cargo":
+        continue
+      if tokens[0].split('/')[^1] != "install":
+        continue
+      if tokens.len < 3:
+        continue
+      var sources: seq[string]
+      var dest = ""
+      var destIsDir = false
+      var i = 1
+      while i < tokens.len:
+        let t = tokens[i].strip(chars = {'\'', '"'})
+        if t == "-t" or t == "--target-directory":
+          if i + 1 < tokens.len:
+            dest = tokens[i + 1].strip(chars = {'\'', '"'})
+            destIsDir = true
+          inc i, 2
+        elif t.startsWith("--target-directory="):
+          dest = t[len("--target-directory=") .. ^1].strip(
+            chars = {'\'', '"'})
+          destIsDir = true
           inc i
+        elif t.len > 0 and t[0] == '-':
+          inc i
+          if t in ["-m", "-o", "-g", "--owner", "--group", "--mode"] and
+              i < tokens.len:
+            inc i
+        else:
+          sources.add t
+          inc i
+      if dest == "" and sources.len > 0:
+        dest = sources[^1]
+        sources.setLen(sources.len - 1)
+      if dest == "" or not dest.startsWith("/"):
+        continue
+      if destIsDir or dest.endsWith("/") or dirExists(dest):
+        for s in sources:
+          result.add dest.strip(leading = false, trailing = true,
+                                chars = {'/'}) & "/" & s.split('/')[^1]
       else:
-        sources.add t
-        inc i
-    if dest == "" and sources.len > 0:
-      dest = sources[^1]
-      sources.setLen(sources.len - 1)
-    if dest == "":
-      continue
-    if destIsDir or dest.endsWith("/") or dirExists(dest):
-      for s in sources:
-        result.add dest.strip(leading = false, trailing = true,
-                              chars = {'/'}) & "/" & s.split('/')[^1]
-    else:
-      result.add dest
+        result.add dest
 
 proc removeInstalled(name: string, paths: seq[string]) =
   for path in paths:
+    if not path.startsWith("/"):
+      echo "  salto relativo (inseguro): " & path
+      continue
     if fileExists(path):
       run(name, "/", elevate("rm -f " & quoteShell(path)))
     elif dirExists(path):
       # rmdir solo borra vacíos: no se lleva nada ajeno.
       run(name, "/", elevate("rmdir " & quoteShell(path)))
 
-proc removePackage*(pkg: string) =
+proc removePackage*(pkg: string): bool =
   let recPath = findRecord(pkg)
   if recPath == "":
     echo pkg & ": no está instalado"
-    return
-  let rec = parseJson(readFile(recPath))
-  let name = rec["name"].getStr()
+    return false
+  var rec: JsonNode
+  try:
+    rec = parseJson(readFile(recPath))
+  except CatchableError:
+    echo "ERROR: registro corrupto: " & recPath
+    return false
+  let name = rec.getOrDefault("name").getStr("")
+  if name == "":
+    echo "ERROR: registro corrupto: " & recPath
+    return false
   let dir = buildDirFor(name)
   if not dirExists(dir):
     echo "ERROR: no está la carpeta de compilación de " & name
-    quit(1)
+    return false
   echo name & ": desinstalando"
   let found = findUninstall(enterSource(dir))
   if found.kind == "rule":
     run(name, found.dir, elevate(found.command))
   elif found.kind == "manifest":
-    uninstallManifest(name, found.command, rec["prefix"].getStr(""),
+    uninstallManifest(name, found.command, rec.getOrDefault("prefix").getStr(""),
                       enterSource(dir))
   else:
     # Capítulos cargo: el capítulo dice qué archivos puso.
     var chapter = ""
     for f in findPackage(name):
-      if f.version == rec["version"].getStr():
+      if f.version == rec.getOrDefault("version").getStr(""):
         chapter = f.chapter
         break
     if chapter == "":
       echo "ERROR: no se encuentra el capítulo de " & name
-      quit(1)
+      return false
     var dests: seq[string]
     for s in installSteps(installSection(chapter)):
       if s.asRoot:
         dests.add installDests(s.code)
-    dests = filterByPrefix(dests, rec["prefix"].getStr(""))
+    dests = filterByPrefix(dests, rec.getOrDefault("prefix").getStr(""))
     if dests.len == 0:
       echo "ERROR: " & name & " no trae forma de desinstalación"
-      quit(1)
+      return false
     removeInstalled(name, dests)
-  removeDir(dir)
-  removeFile(recPath)
+  try:
+    removeDir(dir)
+    removeFile(recPath)
+  except OSError:
+    # Pasos root dejan archivos de root: reintentar borrado con sudo.
+    try:
+      run(name, "/", elevate("rm -rf " & quoteShell(dir)))
+      removeFile(recPath)
+    except CatchableError as e:
+      echo "ERROR: no se pudo borrar estado de " & name & ": " & e.msg
+      echo "  (restos de root: reintentá con sudo)"
+      return false
   echo name & ": desinstalado"
+  return true

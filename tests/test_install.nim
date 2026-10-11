@@ -62,6 +62,11 @@ suite "instalación":
     check steps[1].asRoot
     check steps[1].code == "make install"
 
+  test "installSteps exige clase root exacta":
+    let steps = installSteps("<p>x</p><pre class=\"userinput\" data-rooted=\"1\">make</pre>")
+    check steps.len == 1
+    check not steps[0].asRoot
+
   test "installSteps salta la test suite":
     let steps = installSteps(installSection("<h3>I</h3>" & installBody))
     check "make check" notin steps[0].code
@@ -80,12 +85,17 @@ suite "instalación":
   test "findPrefix saca el prefijo del configure":
     check findPrefix(@["./configure --prefix=/usr \\\nmake"]) == "/usr"
 
+  test "findPrefix acepta espacio y cmake":
+    check findPrefix(@["./configure --prefix /opt"]) == "/opt"
+    check findPrefix(@["cmake -DCMAKE_INSTALL_PREFIX=/usr ."]) == "/usr"
+    check findPrefix(@["meson setup build --prefix /usr"]) == "/usr"
+
   test "findPrefix vacío si no hay":
     check findPrefix(@["make", "make install"]) == ""
 
   test "stepScript guarda y restaura cwd":
     let script = stepScript("make", "/tmp/x/.elun-cwd")
-    check "set -eu" in script
+    check "set -e" in script
     check "cat" in script and "pwd >" in script
     check "SUDO_USER" in script
 
@@ -102,7 +112,7 @@ suite "instalación":
     check formatDur(45) == "45s"
 
   test "formatDur en horas":
-    check formatDur(3661) == "1h1m"
+    check formatDur(3661) == "1h1m1s"
 
   test "average promedia":
     check average(@[10i64, 20i64, 30i64]) == 20
@@ -184,6 +194,21 @@ suite "instalación":
     check installDests("cp a b\nmkdir -p /x\ninstall -Dm755 f /zz-elun-d/") ==
       @["/zz-elun-d/f"]
 
+  test "installDests pela sudo y ruta absoluta de install":
+    check installDests("sudo install -Dm755 f /zz-elun-e/") == @["/zz-elun-e/f"]
+    check installDests("/usr/bin/install -Dm755 f /zz-elun-f/") ==
+      @["/zz-elun-f/f"]
+
+  test "installDests rechaza destino relativo":
+    check installDests("install -Dm755 f rel/dir/f").len == 0
+
+  test "installDests entiende --target-directory=":
+    check installDests("install -Dm755 --target-directory=/zz-elun-g f1") ==
+      @["/zz-elun-g/f1"]
+
+  test "installDests salta cargo":
+    check installDests("cargo install --path . --root /zz-elun-h").len == 0
+
   test "findUninstall ve regla make":
     let dir = getTempDir() / "elun-test-uninst"
     createDir(dir)
@@ -207,4 +232,22 @@ suite "instalación":
     let u = findUninstall(dir)
     check u.kind == "manifest"
     check "install_manifest.txt" in u.command
+    removeDir(dir)
+
+  test "findUninstall no ejecuta make con shell":
+    let dir = getTempDir() / "elun-test-uninst4"
+    createDir(dir)
+    writeFile(dir / "Makefile", "uninstall:\n\techo $(shell id)\n")
+    check findUninstall(dir).kind == ""
+    removeDir(dir)
+
+  test "uninstallManifest exige prefijo":
+    let dir = getTempDir() / "elun-test-manifest"
+    createDir(dir)
+    let target = dir / "victima.txt"
+    writeFile(target, "x")
+    let manifest = dir / "install_manifest.txt"
+    writeFile(manifest, target & "\n")
+    uninstallManifest("t", manifest, "", dir)
+    check fileExists(target)
     removeDir(dir)

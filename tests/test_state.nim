@@ -1,5 +1,6 @@
 import std/[os, tables, unittest]
 import update_books
+import common
 
 suite "manifiestos":
   test "safeHref acepta rutas internas":
@@ -10,6 +11,9 @@ suite "manifiestos":
     check not safeHref("/etc/passwd")
     check not safeHref("../afuera.html")
     check not safeHref("sub/../../afuera.html")
+    check not safeHref("https://ejemplo.com/x.html")
+    check not safeHref("sub/%2e%2e/afuera.html")
+    check not safeHref("sub%2f..%2fx.html")
   test "recordHash guarda el digest nuevo":
     var hashes = initTable[string, string]()
     check recordHash(hashes, "a.html", "contenido")
@@ -46,3 +50,10 @@ suite "manifiestos":
     writeSources(dir, sources)
     check readSources(dir)["https://ejemplo.com/i/"] == "LIBRO.html"
     removeDir(dir)
+
+  test "hrefsIn acepta mayúsculas y comilla simple":
+    check "a.html" in hrefsIn("<A HREF='a.html'>x</A>")
+    check "b.html" in hrefsIn("<a href = \"b.html\">y</a>")
+
+  test "hrefsIn decodifica amp":
+    check "f.cgi?a=1&b=2" in hrefsIn("<a href=\"f.cgi?a=1&amp;b=2\">z</a>")

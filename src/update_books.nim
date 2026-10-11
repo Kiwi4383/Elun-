@@ -30,11 +30,17 @@ const renderedBooks* = [
 ]
 
 proc safeHref*(href: string): bool =
-  ## Solo rutas relativas dentro del libro: ni absolutas ni con "..".
+  ## Solo rutas relativas dentro del libro: ni absolutas, ni URLs externas,
+  ## ni con ".." (incluso codificado como %2e/%2f).
+  let low = href.toLowerAscii
   if href.startsWith("/"):
     return false
+  if "://" in href:
+    return false
+  if "%2e" in low or "%2f" in low or "%5c" in low:
+    return false
   for part in href.split('/'):
-    if part == "..":
+    if part == ".." or part.toLowerAscii == "%2e%2e":
       return false
   return true
 
@@ -42,11 +48,19 @@ proc currentBook*(client: HttpClient, dirUrl: string): string =
   ## Devuelve el nombre del HTML de un solo archivo que el sitio tiene ahora.
   ## El índice ya dice cuál está vigente, así que no hay que comparar versiones.
   ## LFS lo escribe NOCHUNKS y BLFS nochunks, por eso se compara en minúscula.
+  ## Si hay varias variantes, se prefiere la de systemd; el href puede venir
+  ## absoluto, así que se devuelve el basename.
+  var fallback = ""
   for href in hrefsIn(fetch(client, dirUrl).body):
     if href.toLowerAscii.endsWith("nochunks.html"):
-      return href
-  echo "ERROR: no hay libro de un solo archivo en " & dirUrl
-  quit(1)
+      let base = href.split('/')[^1]
+      if "systemd" in href.toLowerAscii:
+        return base
+      if fallback == "":
+        fallback = base
+  if fallback != "":
+    return fallback
+  raise newException(IOError, "no hay libro de un solo archivo en " & dirUrl)
 
 proc loadHashes*(bookDir: string): Table[string, string] =
   ## Ruta relativa dentro del libro -> sha256 de la descarga anterior.
@@ -118,14 +132,7 @@ proc fetchIndexBook(client: HttpClient, book, name, indexUrl,
   sources[indexUrl] = current
   writeSources(bookDir, sources)
 
-proc updateDownloadBooks(client: HttpClient) =
-  ## Los libros que el proyecto LFS publica como un HTML de un solo archivo.
-  ## El nombre vigente del índice se guarda en .elun-source: así la búsqueda
-  ## sabe si salió una versión nueva sin tener que bajar el libro.
-  for (book, name, indexUrl) in indexBooks:
-    fetchIndexBook(client, book, name, indexUrl, currentBook(client, indexUrl))
-
-proc updateBlfsDevelopment*(client: HttpClient) =
+proc updateBlfsDevelopment*(client: HttpClient, preFetchedIndex = "") =
   ## La portada del development enlaza cada capítulo con una ruta relativa, así
   ## que se bajan todos y se guardan con esa misma estructura.
   let bookDir = booksDir / "BLFS"
@@ -133,7 +140,8 @@ proc updateBlfsDevelopment*(client: HttpClient) =
   createDir(bookDir / pagesDir)
   var hashes = loadHashes(bookDir)
 
-  let index = fetch(client, blfsDevelopment).body
+  let index = if preFetchedIndex != "": preFetchedIndex
+              else: fetch(client, blfsDevelopment).body
   if recordHash(hashes, pagesDir & "/index.html", index):
     writeFile(bookDir / pagesDir / "index.html", index)
 
@@ -141,7 +149,12 @@ proc updateBlfsDevelopment*(client: HttpClient) =
   for href in hrefsIn(index):
     # La portada enlaza preface/preface.html dos veces, así que se descarta lo
     # repetido para no bajarlo de nuevo. Solo rutas internas al libro.
-    if (href.endsWith(".html") or href.endsWith(".css")) and
+    let low = href.toLowerAscii
+    if (low.endsWith(".html") or low.endsWith(".css") or
+        low.endsWith(".js") or low.endsWith(".png") or
+        low.endsWith(".jpg") or low.endsWith(".jpeg") or
+        low.endsWith(".gif") or low.endsWith(".svg") or
+        low.endsWith(".ico")) and
         safeHref(href) and href notin pages:
       pages.add href
   echo "BLFS development: " & $pages.len & " archivos"
@@ -156,20 +169,54 @@ proc updateBlfsDevelopment*(client: HttpClient) =
       echo "  " & $(i + 1) & "/" & $pages.len
   saveHashes(bookDir, hashes)
 
+proc syncBlfsDevIfChanged*(client: HttpClient): bool =
+  ## La portada cambia con cada versión del development: si su hash ya no es
+  ## el del manifiesto, hay libro nuevo y se re-bajan las páginas.
+  ## Reusa el índice ya bajado para no pedirlo dos veces.
+  let bookDir = booksDir / "BLFS"
+  let index = fetch(client, blfsDevelopment).body
+  let old = loadHashes(bookDir).getOrDefault(
+    "BLFS-development-systemd/index.html", "")
+  if old == sha256hexdigest(index):
+    return false
+  updateBlfsDevelopment(client, index)
+  return true
+
 proc run*(book: string, dir: string, command: string) =
   echo "  " & command
   let (output, code) = execCmdEx(command, workingDir = dir)
   if code != 0:
     echo output
-    echo "ERROR: " & command & " falló en " & book
-    quit(1)
+    raise newException(IOError, command & " falló en " & book)
 
 proc syncRenderedBook*(book, repo, branch, targets, rev: string) =
   echo book
   let checkout = booksDir / book
   createDir(checkout)
 
+  var oldRev = ""
   if dirExists(checkout / ".git"):
+    try:
+      oldRev = execCmdEx("git rev-parse HEAD",
+        workingDir = checkout).output.strip()
+    except CatchableError:
+      discard
+  if dirExists(checkout / ".git"):
+    try:
+      let actualUrl = execCmdEx("git remote get-url origin",
+        workingDir = checkout).output.strip()
+      if actualUrl != "" and actualUrl != repo:
+        echo "  aviso: " & book & " apunta a " & actualUrl &
+          ", se esperaba " & repo
+    except CatchableError:
+      discard
+    try:
+      let dirty = execCmdEx("git status --porcelain",
+        workingDir = checkout).output.strip()
+      if dirty != "":
+        echo "  aviso: " & book & " tiene cambios locales, el pull puede fallar"
+    except CatchableError:
+      discard
     run(book, checkout, "git fetch --quiet origin")
     if branch != "":
       run(book, checkout, "git checkout --quiet " & quoteShell(branch))
@@ -185,6 +232,15 @@ proc syncRenderedBook*(book, repo, branch, targets, rev: string) =
   # así que el directorio tiene que existir de antemano.
   let renderDir = checkout / "html"
   createDir(renderDir)
+  if oldRev != "":
+    try:
+      let newRev = execCmdEx("git rev-parse HEAD",
+        workingDir = checkout).output.strip()
+      if newRev == oldRev and fileExists(renderDir / "index.html"):
+        echo "  sin cambios, no se renderiza"
+        return
+    except CatchableError:
+      discard
   # targets queda sin blindar a propósito: son dos argumentos, no uno.
   var command = "make --no-print-directory " & targets &
     " BASEDIR=" & quoteShell(renderDir)
@@ -201,25 +257,16 @@ proc syncIndexBookIfChanged*(client: HttpClient, book, name,
   fetchIndexBook(client, book, name, indexUrl, current)
   return true
 
-proc syncBlfsDevIfChanged*(client: HttpClient): bool =
-  ## La portada cambia con cada versión del development: si su hash ya no es
-  ## el del manifiesto, hay libro nuevo y se re-bajan las páginas.
-  let bookDir = booksDir / "BLFS"
-  let index = fetch(client, blfsDevelopment).body
-  let old = loadHashes(bookDir).getOrDefault(
-    "BLFS-development-systemd/index.html", "")
-  if old == sha256hexdigest(index):
-    return false
-  updateBlfsDevelopment(client)
-  return true
-
-proc updateRenderedBooks() =
-  ## BASEDIR se pasa por línea de comandos porque los Makefiles por defecto
-  ## escriben en $(HOME)/public_html/<libro>, que queda fuera de booksDir.
-  ## Los targets son los que arman el HTML: el de pdf de MLFS pide fop, que no
-  ## hace falta para leer el libro.
+proc updateRenderedBooks(): int =
+  ## Devuelve cantidad de fallos. BASEDIR se pasa por línea de comandos porque
+  ## los Makefiles por defecto escriben en $(HOME)/public_html/<libro>, que
+  ## queda fuera de booksDir. Los targets son los que arman el HTML.
   for (book, repo, branch, targets, rev) in renderedBooks:
-    syncRenderedBook(book, repo, branch, targets, rev)
+    try:
+      syncRenderedBook(book, repo, branch, targets, rev)
+    except CatchableError as e:
+      echo "ERROR en " & book & ": " & e.msg
+      inc result
 
 proc migrateFlatLayout() =
   ## La primera versión de Elun dejaba los HTML sueltos en la raíz de booksDir.
@@ -242,24 +289,47 @@ proc migrateFlatLayout() =
       moveFile(oldPath, newPath)
     echo "migrado: " & name & " -> " & book
   for oldHashes in walkFiles(booksDir / "*.md5"):
-    removeFile(oldHashes)
+    let base = oldHashes.splitFile().name
+    # Solo manifiestos viejos de Elun (LFS*/BLFS*), no cualquier .md5 del usuario.
+    if base.startsWith("LFS") or base.startsWith("BLFS") or
+        base.startsWith(".elun"):
+      removeFile(oldHashes)
 
 proc requireTools(tools: openArray[string]) =
   for tool in tools:
     if findExe(tool) == "":
-      echo "ERROR: falta " & tool &
-           ", que necesitan los Makefile de MLFS, GLFS y SLFS"
-      quit(1)
+      raise newException(IOError, "falta " & tool &
+           ", que necesitan los Makefile de MLFS, GLFS y SLFS")
 
 proc updateBooks*() =
   createDir(booksDir)
   migrateFlatLayout()
   requireTools(["git", "make", "xsltproc", "tidy"])
+  # DocBook XSL/XML van por catálogo local con --nonet: avisar si faltan.
+  for cat in ["/etc/xml/catalog", "/usr/share/xml/docbook/xsl-stylesheets"]:
+    if not fileExists(cat) and not dirExists(cat):
+      echo "  aviso: no se ve " & cat &
+        " (DocBook por catálogo local; el make puede fallar sin docbook-xsl/xml)"
 
+  var failures = 0
   let client = newHttpClient(userAgent = "elun")
-  updateDownloadBooks(client)
-  updateBlfsDevelopment(client)
-  client.close()
+  try:
+    for (book, name, indexUrl) in indexBooks:
+      try:
+        fetchIndexBook(client, book, name, indexUrl, currentBook(client, indexUrl))
+      except CatchableError as e:
+        echo "ERROR en " & book & "/" & name & ": " & e.msg
+        inc failures
+    try:
+      updateBlfsDevelopment(client)
+    except CatchableError as e:
+      echo "ERROR en BLFS development: " & e.msg
+      inc failures
+  finally:
+    client.close()
 
-  updateRenderedBooks()
+  failures += updateRenderedBooks()
+  if failures > 0:
+    raise newException(IOError, "update-books terminó con " & $failures &
+      " libro(s) en error (los demás quedaron al día)")
   echo "Los libros quedaron en " & booksDir

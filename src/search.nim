@@ -48,17 +48,18 @@ proc canonTags*(html: string): string =
 proc sectionsOf*(html: string): seq[Section] =
   ## Parte el HTML por sus encabezados h1..h6, en orden. El cuerpo de cada uno
   ## llega hasta el próximo encabezado de su mismo nivel o superior, así que un
-  ## capítulo incluye todas sus subsecciones.
+  ## capítulo incluye todas sus subsecciones. Insensible a mayúsculas.
+  let low = html.toLowerAscii
   var marks: seq[tuple[level: int, start, content: int, title: string]]
   var i = 0
-  while i < html.len - 4:
-    if html[i] == '<' and i + 2 < html.len and html[i + 1] == 'h' and
-        html[i + 2].isDigit:
-      let level = ord(html[i + 2]) - ord('0')
+  while i < low.len - 4:
+    if low[i] == '<' and i + 2 < low.len and low[i + 1] == 'h' and
+        low[i + 2].isDigit:
+      let level = ord(low[i + 2]) - ord('0')
       if level in 1 .. 6:
         let openEnd = html.find('>', i)
         let closeTag = "</h" & $level & ">"
-        let closeStart = html.find(closeTag, openEnd)
+        let closeStart = low.find(closeTag, openEnd)
         if openEnd > 0 and closeStart > 0:
           marks.add (level, i, closeStart + closeTag.len,
                       cleanText(html[openEnd + 1 ..< closeStart]))
@@ -75,18 +76,19 @@ proc sectionsOf*(html: string): seq[Section] =
                        body: html[m.content ..< stop])
 
 proc linkTexts*(body: string): seq[string] =
-  var i = body.find("<a")
+  let low = body.toLowerAscii
+  var i = low.find("<a")
   while i >= 0:
     if i + 2 < body.len and body[i + 2] in {'>', ' ', '\t', '\n', '\r', '\f'}:
       let b = body.find('>', i)
-      let c = if b > 0: body.find("</a>", b) else: -1
+      let c = if b > 0: low.find("</a>", b) else: -1
       if b > 0 and c > b:
         let t = cleanText(body[b + 1 ..< c])
         if t != "" and t notin result:
           result.add t
         i = c + 4
         continue
-    i = body.find("<a", i + 2)
+    i = low.find("<a", i + 2)
 
 proc splitNameVersion*(s: string): tuple[name, version: string] =
   var i = s.len - 1
@@ -130,7 +132,9 @@ proc matchHeading*(raw, query: string): tuple[ok: bool, name, version: string] =
   return (true, name, version)
 
 proc splitItems*(s: string): seq[string] =
-  for part in stripTags(s).replace(" and ", ",").split(','):
+  let norm = stripTags(s).replace(" and ", ",").replace(" AND ", ",")
+    .replace(" And ", ",").replace(" & ", ",").replace(";", ",")
+  for part in norm.split(','):
     let t = part.strip()
     if t != "" and t notin result:
       result.add t
@@ -138,9 +142,13 @@ proc splitItems*(s: string): seq[string] =
 proc appendixDeps*(path, name: string): tuple[deps: Deps, found: bool] =
   ## Apéndice C de LFS/MLFS: entradas <h2>/<h3>Nombre</h3> con pares
   ## "Installation depends on:" / "Required at runtime:" / ...
+  ## Etiquetas insensibles a capitalización; el nombre acepta entrada
+  ## versionada ("Foo-1.5" vale por "Foo").
   let html = canonTags(readFile(path))
   for s in sectionsOf(html):
-    if s.level in [2, 3] and s.title.toLowerAscii == name.toLowerAscii:
+    if s.level in [2, 3] and
+        splitNameVersion(s.title.strip()).name.toLowerAscii ==
+        name.strip().toLowerAscii:
       var deps: Deps
       var rest = s.body
       while true:
@@ -148,17 +156,20 @@ proc appendixDeps*(path, name: string): tuple[deps: Deps, found: bool] =
         if a < 0: break
         let b = rest.find("</strong>", a)
         if b < 0: break
-        let label = cleanText(rest[a ..< b])
+        let label = cleanText(rest[a ..< b]).toLowerAscii.strip()
         let c = rest.find("<span class=\"segbody\">", b)
         if c < 0: break
         let d = rest.find("</span>", c)
         if d < 0: break
         let items = splitItems(rest[c ..< d])
-        if label == "Installation depends on:":
+        if label.startsWith("installation depends on"):
           deps.build.add items
-        elif label == "Required at runtime:":
+        elif label.startsWith("required at runtime"):
           deps.runtime.add items
-        elif label in ["Test suite depends on:", "Optional dependencies:"]:
+        elif label.startsWith("test suite depends on") or
+            label.startsWith("optional"):
+          deps.optional.add items
+        else:
           deps.optional.add items
         rest = rest[d + 7 .. ^1]
       return (deps, true)
@@ -173,49 +184,114 @@ proc classify*(deps: var Deps, sub: string, items: seq[string]) =
   ## Required y Recommended hacen falta para compilar; lo marcado como runtime
   ## hace falta para funcionar; el resto es opcional. Los avisos no son
   ## subsecciones aunque vengan como encabezado.
-  if sub.toLowerAscii in asides:
+  if sub.toLowerAscii.strip() in asides:
     return
   let low = sub.toLowerAscii
   if "runtime" in low:
     deps.runtime.addUnique items
-  elif "test" in low or "option" in low:
+    return
+  let toks = low.split({' ', '\t', '-', '_', '/', '(', ')', ',', ':', '.'})
+  let hasTest = "test" in toks or "tests" in toks or "testsuite" in toks or
+    "test suite" in low or "check" in toks
+  let hasOption = "optional" in toks or "option" in toks or "options" in toks
+  if hasTest or hasOption:
     deps.optional.addUnique items
-  else:
+    return
+  if "requir" in low or "recommend" in low:
     deps.build.addUnique items
+    return
+  deps.optional.addUnique items
 
 proc detailBlocks*(body: string): seq[tuple[title, content: string]] =
   ## GLFS/SLFS meten las subsecciones en <details><summary>Sub</summary>.
-  var rest = body
+  ## Soporta <summary> con atributos y <details> anidados.
+  let low = body.toLowerAscii
+  var rest = 0
   while true:
-    let a = rest.find("<details")
+    let a = low.find("<details", rest)
     if a < 0: break
-    let b = rest.find('>', a)
+    let b = body.find('>', a)
     if b < 0: break
-    let c = rest.find("</details>", b)
+    # Cierre que balancea la apertura (anidados cuentan).
+    var depth = 1
+    var k = b + 1
+    var c = -1
+    while depth > 0:
+      let nxOpen = low.find("<details", k)
+      let nxClose = low.find("</details>", k)
+      if nxClose < 0:
+        break
+      if nxOpen >= 0 and nxOpen < nxClose:
+        inc depth
+        k = nxOpen + 8
+      else:
+        dec depth
+        if depth == 0:
+          c = nxClose
+        k = nxClose + 10
     if c < 0: break
-    let inner = rest[b + 1 ..< c]
-    let s1 = inner.find("<summary>")
-    let s2 = if s1 >= 0: inner.find("</summary>", s1) else: -1
-    if s1 >= 0 and s2 > s1:
-      result.add (cleanText(inner[s1 + 9 ..< s2]), inner[s2 + 10 .. ^1])
-    rest = rest[c + 10 .. ^1]
+    let inner = body[b + 1 ..< c]
+    let innerLow = inner.toLowerAscii
+    let s1open = innerLow.find("<summary")
+    if s1open >= 0:
+      let s1b = inner.find('>', s1open)
+      let s2 = innerLow.find("</summary>", s1b)
+      if s1b > s1open and s2 > s1b:
+        result.add (cleanText(inner[s1b + 1 ..< s2]), inner[s2 + 10 .. ^1])
+    rest = k
+
+proc hasPackageMarker*(s: string): bool =
+  ## Detecta class="package" (o 'package', clases extra, mayúsculas) sin
+  ## exigir el string exacto `class="package"`.
+  let low = s.toLowerAscii
+  var i = low.find("class")
+  while i >= 0:
+    var j = i + 5
+    while j < s.len and s[j] in {' ', '\t', '\n', '\r', '\f'}:
+      inc j
+    if j < s.len and s[j] == '=':
+      inc j
+      while j < s.len and s[j] in {' ', '\t', '\n', '\r', '\f'}:
+        inc j
+      if j < s.len and s[j] in {'"', '\''}:
+        let q = s[j]
+        let k = s.find(q, j + 1)
+        if k > j:
+          if "package" in s[j + 1 ..< k].toLowerAscii.splitWhitespace():
+            return true
+          i = low.find("class", k + 1)
+          continue
+    i = low.find("class", j + 1)
+  return false
 
 proc blfsDepsOn*(html: string): tuple[deps: Deps, found: bool] =
   ## Sección "<Nombre> Dependencies" de BLFS/GLFS/SLFS, con subsecciones
   ## Required, Recommended, Recommended at runtime, Optional, ...
+  ## Acepta el título genérico "Dependencies" y subsecciones en niveles
+  ## más profundos (h5 bajo h3): la subsección vigente se hereda.
   let sections = sectionsOf(html)
   for k, s in sections:
-    if s.level in 2 .. 4 and s.title.toLowerAscii.endsWith("dependencies") and
-        s.title.len > len("dependencies"):
+    let st = s.title.toLowerAscii.strip()
+    if s.level in 2 .. 4 and st.endsWith("dependencies") and
+        (st == "dependencies" or s.title.len > len("dependencies")):
       var deps: Deps
       var j = k + 1
+      var currentSub = ""
       # Un Note/Warning no cierra la sección en ningún nivel: se salta y se
       # sigue. Cualquier otro encabezado de nivel igual o superior sí la cierra.
       while j < sections.len and (sections[j].level > s.level or
-          sections[j].title.toLowerAscii in asides):
+          sections[j].title.toLowerAscii.strip() in asides):
         let sub = sections[j].title
-        if sections[j].level == s.level + 1:
-          classify(deps, sub, linkTexts(sections[j].body))
+        if sub.toLowerAscii.strip() notin asides:
+          if sections[j].level == s.level + 1:
+            currentSub = sub
+            classify(deps, sub, linkTexts(sections[j].body))
+          elif sections[j].level > s.level + 1:
+            # Salto de nivel (h5 bajo h3 sin h4): la primera subsección
+            # profunda establece la vigente.
+            if currentSub == "":
+              currentSub = sub
+            classify(deps, currentSub, linkTexts(sections[j].body))
         inc j
       for d in detailBlocks(s.body):
         classify(deps, d.title, linkTexts(d.content))
@@ -232,15 +308,12 @@ proc withDeps*(book, location, section, name, version, html,
   if blfs.found:
     result.deps = blfs.deps
   if appendix != "" and fileExists(appendix):
-    # El apéndice completa lo que el capítulo no trae.
+    # El apéndice completa lo que el capítulo no trae: unión, no reemplazo.
     let entry = appendixDeps(appendix, name)
     if entry.found:
-      if result.deps.build.len == 0:
-        result.deps.build = entry.deps.build
-      if result.deps.runtime.len == 0:
-        result.deps.runtime = entry.deps.runtime
-      if result.deps.optional.len == 0:
-        result.deps.optional = entry.deps.optional
+      result.deps.build.addUnique entry.deps.build
+      result.deps.runtime.addUnique entry.deps.runtime
+      result.deps.optional.addUnique entry.deps.optional
       return
   if blfs.found:
     return
@@ -254,17 +327,21 @@ proc relPath*(path: string): string =
 proc searchNochunks*(book, path, query: string): seq[Found] =
   if not fileExists(path):
     return
-  let html = canonTags(readFile(path))
-  # Solo el apéndice C de LFS/MLFS usa anclas "xxx-dep" en sus entradas.
-  let lfsKind = "-dep\"" in html
+  var html: string
+  try:
+    html = canonTags(readFile(path))
+  except CatchableError:
+    return
+  # Apéndice en el mismo archivo (LFS/MLFS): hay marcadores segtitle.
+  let hasAppendix = "segtitle" in html.toLowerAscii
   let location = relPath(path)
   for s in sectionsOf(html):
     if s.level notin [1, 2]:
       continue
     let m = matchHeading(s.title, query)
-    if not m.ok or "class=\"package\"" notin s.body:
+    if not m.ok or not hasPackageMarker(s.body):
       continue
-    if lfsKind:
+    if hasAppendix:
       result.add withDeps(book, location, s.title, m.name, m.version, s.body,
                           path)
     else:
@@ -274,11 +351,20 @@ proc searchNochunks*(book, path, query: string): seq[Found] =
 proc searchChunked*(book, dir, appendix, query: string): seq[Found] =
   if not dirExists(dir):
     return
-  for path in walkDirRec(dir):
-    if not path.endsWith(".html"):
+  var paths: seq[string]
+  try:
+    for path in walkDirRec(dir):
+      if path.endsWith(".html"):
+        paths.add path
+  except CatchableError:
+    return
+  for path in paths:
+    var html: string
+    try:
+      html = canonTags(readFile(path))
+    except CatchableError:
       continue
-    let html = canonTags(readFile(path))
-    if "class=\"package\"" notin html:
+    if not hasPackageMarker(html):
       continue
     for h in sectionsOf(html):
       if h.level != 1:
@@ -317,44 +403,90 @@ proc syncRenderedIfStale(book, repo, branch, targets, rev: string): bool =
   ## con el checkout, hay libro nuevo.
   let checkout = booksDir / book
   if not dirExists(checkout / ".git"):
+    # Checkout ausente: hay libro nuevo (hay que clonarlo), no "nada que hacer".
+    return true
+  try:
+    let local = execCmdEx("git rev-parse HEAD",
+                          workingDir = checkout).output.strip()
+    let former = if branch != "": branch else: "HEAD"
+    let remoteOut = execCmdEx("git ls-remote " & quoteShell(repo) & " " &
+                              quoteShell(former), workingDir = booksDir)
+    if remoteOut.exitCode != 0:
+      return false
+    let remote = remoteOut.output.splitWhitespace()
+    if remote.len == 0 or remote[0] == local:
+      return false
+    syncRenderedBook(book, repo, branch, targets, rev)
+    return true
+  except CatchableError:
     return false
-  let local = execCmdEx("git rev-parse HEAD",
-                        workingDir = checkout).output.strip()
-  let former = if branch != "": branch else: "HEAD"
-  let remoteOut = execCmdEx("git ls-remote " & quoteShell(repo) & " " &
-                            quoteShell(former), workingDir = booksDir)
-  if remoteOut.exitCode != 0:
-    return false
-  let remote = remoteOut.output.splitWhitespace()
-  if remote.len == 0 or remote[0] == local:
-    return false
-  syncRenderedBook(book, repo, branch, targets, rev)
-  return true
 
 proc refreshIfStale(client: HttpClient): bool =
   for (book, name, indexUrl) in indexBooks:
-    if bookPresent(book, name) and
-        syncIndexBookIfChanged(client, book, name, indexUrl):
+    try:
+      if bookPresent(book, name) and
+          syncIndexBookIfChanged(client, book, name, indexUrl):
+        result = true
+    except CatchableError as e:
+      echo "  aviso: no se pudo revisar " & book & ": " & e.msg
+  try:
+    if dirExists(booksDir / "BLFS" / "BLFS-development-systemd") and
+        syncBlfsDevIfChanged(client):
       result = true
-  if dirExists(booksDir / "BLFS" / "BLFS-development-systemd") and
-      syncBlfsDevIfChanged(client):
-    result = true
+  except CatchableError as e:
+    echo "  aviso: no se pudo revisar BLFS development: " & e.msg
   for (book, repo, branch, targets, rev) in renderedBooks:
-    if syncRenderedIfStale(book, repo, branch, targets, rev):
-      result = true
+    try:
+      if syncRenderedIfStale(book, repo, branch, targets, rev):
+        result = true
+    except CatchableError as e:
+      echo "  aviso: no se pudo revisar " & book & ": " & e.msg
+
+proc findPackageLocal*(pkg: string): seq[Found] =
+  ## Búsqueda de solo lectura: nunca toca la red. Para `orphans`/`list`.
+  if not dirExists(booksDir):
+    return @[]
+  try:
+    result = searchOnce(pkg)
+  except CatchableError:
+    return @[]
 
 proc findPackage*(pkg: string): seq[Found] =
   if not dirExists(booksDir):
     echo "no hay libros: corré `elun update-books` primero"
     return @[]
-  result = searchOnce(pkg)
+  try:
+    result = searchOnce(pkg)
+  except CatchableError as e:
+    echo "aviso: no se pudo leer los libros: " & e.msg
+    return @[]
   if result.len == 0:
     echo pkg & ": no está en los libros, buscando libros nuevos..."
     let client = newHttpClient(userAgent = "elun")
-    if refreshIfStale(client):
-      result = searchOnce(pkg)
+    try:
+      if refreshIfStale(client):
+        try:
+          result = searchOnce(pkg)
+        except CatchableError as e:
+          echo "aviso: no se pudo releer los libros: " & e.msg
+    except CatchableError as e:
+      echo "aviso: sin red, no se pudo buscar libros nuevos: " & e.msg
     client.close()
   if result.len == 0:
+    let (qname, qver) = splitNameVersion(pkg)
+    if qver != "":
+      try:
+        let same = searchOnce(qname)
+        if same.len > 0:
+          var vers: seq[string]
+          for f in same:
+            if f.version notin vers:
+              vers.add f.version
+          echo "aviso: " & pkg & " no existe en los libros, pero " & qname &
+            " sí (versiones: " & vers.join(", ") & ")"
+          return @[]
+      except CatchableError:
+        discard
     echo "aviso: " & pkg & " no existe en los libros"
 
 proc printFound*(found: seq[Found]) =

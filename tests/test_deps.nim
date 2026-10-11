@@ -58,6 +58,9 @@ suite "dependencias":
   test "splitItems parte por and":
     check splitItems("Bash and GCC") == @["Bash", "GCC"]
 
+  test "splitItems parte por & y punto y coma":
+    check splitItems("Bash & GCC; Make") == @["Bash", "GCC", "Make"]
+
   test "splitItems saca vacíos y duplicados":
     check splitItems("Bash,, Bash and ") == @["Bash"]
 
@@ -90,6 +93,18 @@ suite "dependencias":
     var deps: Deps
     classify(deps, "Optional if Running the Test Suite", @["libt-1.0"])
     check deps.optional == @["libt-1.0"]
+
+  test "classify heading desconocido va a opcional":
+    var deps: Deps
+    classify(deps, "Suggested", @["libs-1.0"])
+    check deps.optional == @["libs-1.0"]
+    check deps.build.len == 0
+
+  test "classify Latest no es test suite":
+    var deps: Deps
+    classify(deps, "Latest", @["libx-1.0"])
+    check deps.optional == @["libx-1.0"]
+    check deps.build.len == 0
 
   test "classify ignora avisos":
     var deps: Deps
@@ -160,3 +175,31 @@ suite "dependencias":
 
   test "blfsDepsOn avisa si no hay sección":
     check not blfsDepsOn("<h1>Foo-1.5</h1><p>nada</p>").found
+
+  test "blfsDepsOn lee subsección con salto de nivel":
+    let html = "<h1>Foo-1.5</h1>" &
+      "<div class=\"package\"><p>x</p></div>" &
+      "<h3>Foo Dependencies</h3>" &
+      "<h5>Required</h5><p><a href=\"#a\">liba-1.0</a></p>" &
+      "<h3>Installation of Foo</h3>"
+    let res = blfsDepsOn(html)
+    check res.found
+    check res.deps.build == @["liba-1.0"]
+
+  test "withDeps une capítulo y apéndice":
+    let chapter = "<h1>Foo-1.5</h1>" &
+      "<div class=\"package\"><p>x</p></div>" &
+      "<h3>Foo Dependencies</h3>" &
+      "<h4>Required</h4><p><a href=\"#a\">liba-1.0</a></p>"
+    let dir = getTempDir() / "elun-test-merge"
+    let appendix = writeTmp(dir, "deps.html",
+      "<h3>Foo</h3>" &
+      "<strong class=\"segtitle\">Installation depends on:</strong>" &
+      "<span class=\"segbody\">Bash</span>" &
+      "<strong class=\"segtitle\">Required at runtime:</strong>" &
+      "<span class=\"segbody\">Glibc</span>")
+    let f = withDeps("T", "f.html", "Foo-1.5", "Foo", "1.5", chapter, appendix)
+    check "liba-1.0" in f.deps.build
+    check "Bash" in f.deps.build
+    check "Glibc" in f.deps.runtime
+    removeDir(dir)

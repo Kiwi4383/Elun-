@@ -35,13 +35,5 @@ nimble build
 ./elun install curl
 ```
 
-## Status
-
-- Phase 1: books download and stay up to date. Done.
-- Phase 2: branch-aware search (developer first, stable after) with
-  dependency report. Done.
-- Phase 3: build and install, with sudo for root steps. Done.
-- Phase 4: failure logs and orphans done; dependency resolution still open.
-
 Spec (Spanish): `Elun.md`.
 License: BSD Zero Clause.
